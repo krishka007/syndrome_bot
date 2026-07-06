@@ -15,7 +15,7 @@ logging.basicConfig(level=logging.INFO, stream=sys.stdout)
 logger = logging.getLogger(__name__)
 
 # =================================================================
-# КОНФИГУРАЦИЯ (ВСЁ ЗАМЕНЕНО)
+# КОНФИГУРАЦИЯ
 # =================================================================
 BOT_TOKEN = "8978316248:AAF4n6jG5gr4quppre6H1NB7U9LjEjnESqs"
 ADMIN_ID = 7753887058
@@ -24,13 +24,9 @@ TONCENTER_API_KEY = "12237ee2c684a00cd473582230a4d9efea8b51b6baf2322883e4ef52f5d
 TONCENTER_URL = "https://toncenter.com/api/v2"
 
 RENDER_URL = os.environ.get('RENDER_EXTERNAL_HOSTNAME', 'syndrome-bot-9.onrender.com')
-WEBAPP_URL = "https://syndrome-bot-12.onrender.com"
+WEBAPP_URL = "https://syndrome-bot-13.onrender.com"
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 BOT_USERNAME = "nft_takes_gifts_bot"
-
-logger.info(f"🚀 Starting bot @{BOT_USERNAME}")
-logger.info(f"📱 WebApp: {WEBAPP_URL}")
-logger.info(f"👑 Admin: {ADMIN_ID}")
 
 # =================================================================
 # БАЗА ДАННЫХ
@@ -54,8 +50,7 @@ def init_db():
                 total_deposited_ton REAL DEFAULT 0,
                 nft_items TEXT DEFAULT '[]',
                 gift_items TEXT DEFAULT '[]',
-                pending_payment_id TEXT,
-                pending_amount REAL DEFAULT 0,
+                last_free_case TIMESTAMP,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
             CREATE TABLE IF NOT EXISTS transactions (
@@ -65,7 +60,6 @@ def init_db():
                 amount REAL,
                 currency TEXT,
                 tx_hash TEXT,
-                status TEXT DEFAULT 'completed',
                 timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
             CREATE TABLE IF NOT EXISTS withdrawals (
@@ -77,77 +71,51 @@ def init_db():
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
         ''')
-    logger.info("✅ Database ready")
+    logger.info("DB ready")
 
 # =================================================================
-# TON ПРОВЕРКА ПЛАТЕЖЕЙ
+# TON VERIFICATION
 # =================================================================
-def verify_ton_transaction(wallet_address, comment, expected_amount=None, hours=24):
-    """Проверка транзакции через TON Center API"""
+def verify_ton_transaction(wallet_address, comment, hours=24):
     try:
-        params = {
-            'address': wallet_address,
-            'limit': 50,
-            'api_key': TONCENTER_API_KEY
-        }
+        params = {'address': wallet_address, 'limit': 50, 'api_key': TONCENTER_API_KEY}
         r = requests.get(f"{TONCENTER_URL}/getTransactions", params=params, timeout=10)
-        if r.status_code != 200:
-            return None
-        
+        if r.status_code != 200: return None
         data = r.json()
-        if not data.get('ok'):
-            return None
-        
+        if not data.get('ok'): return None
         cutoff = datetime.now() - timedelta(hours=hours)
-        
         for tx in data.get('result', []):
             in_msg = tx.get('in_msg', {})
-            if not in_msg:
-                continue
-            
-            source = in_msg.get('source', '')
-            if source == wallet_address:
-                continue
-            
+            if not in_msg: continue
+            if in_msg.get('source','') == wallet_address: continue
             value = int(in_msg.get('value', 0)) / 1_000_000_000
             msg = in_msg.get('message', '')
-            
             if comment.upper() in msg.upper():
                 tx_time = datetime.fromtimestamp(tx.get('utime', 0))
                 if tx_time > cutoff:
-                    if expected_amount and value < expected_amount:
-                        continue
-                    return {
-                        'hash': tx.get('hash', ''),
-                        'amount': value,
-                        'from': source,
-                        'time': tx_time.isoformat()
-                    }
+                    return {'hash': tx.get('hash',''), 'amount': value}
         return None
     except Exception as e:
-        logger.error(f"TON check error: {e}")
+        logger.error(f"TON: {e}")
         return None
 
 # =================================================================
-# TELEGRAM API
+# TELEGRAM API HELPERS
 # =================================================================
 def tg_request(method, data=None):
     try:
         r = requests.post(f"{TELEGRAM_API}/{method}", json=data or {}, timeout=10)
         return r.json()
-    except:
-        return None
+    except: return None
 
 def tg_send(chat_id, text, keyboard=None):
     data = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
-    if keyboard:
-        data["reply_markup"] = json.dumps(keyboard)
+    if keyboard: data["reply_markup"] = json.dumps(keyboard)
     return tg_request("sendMessage", data)
 
 def tg_edit(chat_id, msg_id, text, keyboard=None):
     data = {"chat_id": chat_id, "message_id": msg_id, "text": text, "parse_mode": "HTML"}
-    if keyboard:
-        data["reply_markup"] = json.dumps(keyboard)
+    if keyboard: data["reply_markup"] = json.dumps(keyboard)
     return tg_request("editMessageText", data)
 
 def tg_answer(cb_id, text=""):
@@ -157,181 +125,160 @@ def generate_payment_id(user_id):
     return hashlib.sha256(f"{user_id}{time.time()}{random.randint(0,9999)}".encode()).hexdigest()[:16].upper()
 
 # =================================================================
-# КЛАВИАТУРЫ
+# GIFT CASE DATA (Telegram Gift Style)
 # =================================================================
-def menu_kb():
-    return {"inline_keyboard": [
-        [{"text": "🎰 ЗАПУСТИТЬ SYNDROME CASINO", "web_app": {"url": WEBAPP_URL}}],
+GIFT_CASES = {
+    "common": {
+        "name": "Обычный кейс",
+        "icon": "📦",
+        "price_ton": 1,
+        "price_stars": 10,
+        "color": "#9CA3AF",
+        "items": [
+            {"name": "❤️ Сердечко", "icon": "❤️", "rarity": "common", "chance": 30, "value": 0.5},
+            {"name": "🌹 Роза", "icon": "🌹", "rarity": "common", "chance": 25, "value": 0.8},
+            {"name": "🎈 Шарик", "icon": "🎈", "rarity": "common", "chance": 20, "value": 0.3},
+            {"name": "🍀 Клевер", "icon": "🍀", "rarity": "common", "chance": 15, "value": 0.6},
+            {"name": "💍 Кольцо", "icon": "💍", "rarity": "rare", "chance": 7, "value": 3.0},
+            {"name": "💎 Кристалл", "icon": "💎", "rarity": "rare", "chance": 3, "value": 5.0},
+        ]
+    },
+    "rare": {
+        "name": "Редкий кейс",
+        "icon": "🎁",
+        "price_ton": 5,
+        "price_stars": 50,
+        "color": "#60A5FA",
+        "items": [
+            {"name": "💎 Кристалл", "icon": "💎", "rarity": "rare", "chance": 30, "value": 5.0},
+            {"name": "👑 Корона", "icon": "👑", "rarity": "rare", "chance": 25, "value": 8.0},
+            {"name": "💍 Кольцо", "icon": "💍", "rarity": "rare", "chance": 20, "value": 6.0},
+            {"name": "🌟 Звезда", "icon": "🌟", "rarity": "epic", "chance": 15, "value": 20.0},
+            {"name": "🔮 Шар", "icon": "🔮", "rarity": "epic", "chance": 8, "value": 30.0},
+            {"name": "🐉 Дракон", "icon": "🐉", "rarity": "legendary", "chance": 2, "value": 100.0},
+        ]
+    },
+    "epic": {
+        "name": "Эпический кейс",
+        "icon": "✨",
+        "price_ton": 15,
+        "price_stars": 150,
+        "color": "#A78BFA",
+        "items": [
+            {"name": "🌟 Звезда", "icon": "🌟", "rarity": "epic", "chance": 30, "value": 20.0},
+            {"name": "🔮 Шар", "icon": "🔮", "rarity": "epic", "chance": 25, "value": 30.0},
+            {"name": "🐉 Дракон", "icon": "🐉", "rarity": "legendary", "chance": 20, "value": 100.0},
+            {"name": "🦄 Единорог", "icon": "🦄", "rarity": "legendary", "chance": 15, "value": 150.0},
+            {"name": "🏆 Кубок", "icon": "🏆", "rarity": "mythic", "chance": 7, "value": 500.0},
+            {"name": "👼 Ангел", "icon": "👼", "rarity": "mythic", "chance": 3, "value": 1000.0},
+        ]
+    },
+    "legendary": {
+        "name": "Легендарный кейс",
+        "icon": "👑",
+        "price_ton": 50,
+        "price_stars": 500,
+        "color": "#FBBF24",
+        "items": [
+            {"name": "🐉 Дракон", "icon": "🐉", "rarity": "legendary", "chance": 30, "value": 100.0},
+            {"name": "🦄 Единорог", "icon": "🦄", "rarity": "legendary", "chance": 25, "value": 150.0},
+            {"name": "🏆 Кубок", "icon": "🏆", "rarity": "mythic", "chance": 20, "value": 500.0},
+            {"name": "👼 Ангел", "icon": "👼", "rarity": "mythic", "chance": 15, "value": 1000.0},
+            {"name": "🌌 Галактика", "icon": "🌌", "rarity": "mythic", "chance": 7, "value": 5000.0},
+            {"name": "⚡ Молния", "icon": "⚡", "rarity": "mythic", "chance": 3, "value": 10000.0},
+        ]
+    }
+}
+
+# =================================================================
+# BOT HANDLERS
+# =================================================================
+def handle_start(chat_id, user):
+    uid = user["id"]
+    uname = user.get("username", f"user_{uid}")
+    fname = user.get("first_name", "Player")
+    with db_connect() as conn:
+        conn.execute('INSERT OR IGNORE INTO users (user_id, username, first_name) VALUES (?,?,?)', (uid, uname, fname))
+    
+    keyboard = {"inline_keyboard": [
+        [{"text": "🎁 ОТКРЫВАТЬ КЕЙСЫ", "web_app": {"url": WEBAPP_URL}}],
         [{"text": "💎 ПОПОЛНИТЬ TON", "callback_data": "dep_ton"}],
-        [{"text": "⭐ ПОПОЛНИТЬ STARS", "callback_data": "dep_stars"}],
         [{"text": "💼 ПРОФИЛЬ", "callback_data": "profile"}]
     ]}
+    
+    tg_send(chat_id, 
+        "🎁 <b>GIFT CASES — КЕЙСЫ ПОДАРКОВ</b> 🎁\n\n"
+        "📦 Обычный • 🎁 Редкий\n"
+        "✨ Эпический • 👑 Легендарный\n\n"
+        "💎 Цены от 1 TON / 10 Stars\n"
+        "🎉 Шанс выбить МИФИЧЕСКИЙ подарок!\n\n"
+        "<b>👇 НАЖМИ НА КНОПКУ!</b>",
+        keyboard
+    )
 
-def pay_check_kb(payment_id):
-    return {"inline_keyboard": [
-        [{"text": "✅ ПРОВЕРИТЬ ОПЛАТУ", "callback_data": f"check_{payment_id}"}],
+def handle_dep_ton(cb, chat_id, msg_id, uid):
+    tg_answer(cb["id"])
+    pid = generate_payment_id(uid)
+    with db_connect() as conn:
+        conn.execute('UPDATE users SET pending_payment_id=? WHERE user_id=?', (pid, uid))
+    
+    keyboard = {"inline_keyboard": [
+        [{"text": "✅ ПРОВЕРИТЬ", "callback_data": f"check_{pid}"}],
         [{"text": "🔄 НОВЫЙ КОД", "callback_data": "dep_ton"}],
         [{"text": "🏠 МЕНЮ", "callback_data": "menu"}]
     ]}
-
-def back_kb():
-    return {"inline_keyboard": [[{"text": "🏠 ГЛАВНОЕ МЕНЮ", "callback_data": "menu"}]]}
-
-# =================================================================
-# ОБРАБОТЧИКИ
-# =================================================================
-def handle_start(chat_id, user):
-    user_id = user["id"]
-    username = user.get("username", f"user_{user_id}")
-    first_name = user.get("first_name", "Player")
-    
-    with db_connect() as conn:
-        conn.execute(
-            'INSERT OR IGNORE INTO users (user_id, username, first_name) VALUES (?, ?, ?)',
-            (user_id, username, first_name)
-        )
-    
-    tg_send(chat_id,
-        "🔥 <b>SYNDROME CASINO</b> 🔥\n\n"
-        "🎰 Слоты, Рулетка, Кости, Блэкджек\n"
-        "🎁 Подарки Telegram\n"
-        "🖼️ NFT Кейсы (20 TON)\n"
-        "💎 TON + ⭐ Stars\n\n"
-        "<b>👇 НАЖМИ КНОПКУ НИЖЕ!</b>",
-        menu_kb()
-    )
-
-def handle_deposit_ton(callback, chat_id, msg_id, user_id):
-    tg_answer(callback["id"])
-    
-    payment_id = generate_payment_id(user_id)
-    with db_connect() as conn:
-        conn.execute(
-            'UPDATE users SET pending_payment_id=?, pending_amount=0 WHERE user_id=?',
-            (payment_id, user_id)
-        )
     
     tg_edit(chat_id, msg_id,
         f"💎 <b>ПОПОЛНЕНИЕ TON</b>\n\n"
         f"📤 Кошелёк:\n<code>{TON_WALLET}</code>\n\n"
-        f"📝 Код:\n<code>{payment_id}</code>\n\n"
+        f"📝 Код:\n<code>{pid}</code>\n\n"
         f"⚠️ Мин: <b>1 TON</b>\n"
         f"⚠️ Укажите код в комментарии!",
-        pay_check_kb(payment_id)
+        keyboard
     )
 
-def handle_check_payment(callback, chat_id, msg_id, user_id, payment_id):
-    """РЕАЛЬНАЯ ПРОВЕРКА ПЛАТЕЖА"""
-    tg_answer(callback["id"], "🔍 Проверяю блокчейн TON...")
-    
-    result = verify_ton_transaction(TON_WALLET, payment_id)
+def handle_check(cb, chat_id, msg_id, uid, pid):
+    tg_answer(cb["id"], "🔍 Проверяю блокчейн...")
+    result = verify_ton_transaction(TON_WALLET, pid)
     
     if result:
-        amount = result['amount']
+        amt = result['amount']
         with db_connect() as conn:
-            conn.execute(
-                'UPDATE users SET balance_ton=balance_ton+?, total_deposited_ton=total_deposited_ton+?, pending_payment_id=NULL WHERE user_id=?',
-                (amount, amount, user_id)
-            )
-            conn.execute(
-                'INSERT INTO transactions (user_id, type, amount, currency, tx_hash) VALUES (?,?,?,?,?)',
-                (user_id, 'deposit_ton', amount, 'TON', result['hash'][:20])
-            )
+            conn.execute('UPDATE users SET balance_ton=balance_ton+?, total_deposited_ton=total_deposited_ton+?, pending_payment_id=NULL WHERE user_id=?', (amt, amt, uid))
         
-        tg_edit(chat_id, msg_id,
-            f"✅ <b>ПЛАТЕЖ ЗАЧИСЛЕН!</b>\n\n"
-            f"💰 +{amount:.4f} TON\n"
-            f"🔗 {result['hash'][:20]}...\n\n"
-            f"🎰 Играйте в казино!",
-            {"inline_keyboard": [[{"text": "🎰 ИГРАТЬ", "web_app": {"url": WEBAPP_URL}}]]}
-        )
-        
-        # Уведомление админу
-        tg_send(ADMIN_ID, f"💰 <b>+{amount:.4f} TON</b> от {user_id}")
+        keyboard = {"inline_keyboard": [[{"text": "🎁 ОТКРЫВАТЬ КЕЙСЫ", "web_app": {"url": WEBAPP_URL}}]]}
+        tg_edit(chat_id, msg_id, f"✅ <b>ЗАЧИСЛЕНО!</b>\n\n💰 +{amt:.4f} TON\n\n🎁 Открывайте кейсы!", keyboard)
+        tg_send(ADMIN_ID, f"💰 +{amt:.4f} TON от {uid}")
     else:
-        tg_edit(chat_id, msg_id,
-            "❌ <b>ПЛАТЕЖ НЕ НАЙДЕН</b>\n\n"
-            "• Проверьте код в комментарии\n"
-            "• Транзакция идёт до 5 минут\n"
-            "• Минимум: 1 TON",
-            pay_check_kb(payment_id)
-        )
+        keyboard = {"inline_keyboard": [
+            [{"text": "🔄 ПРОВЕРИТЬ СНОВА", "callback_data": f"check_{pid}"}],
+            [{"text": "💎 НОВЫЙ КОД", "callback_data": "dep_ton"}]
+        ]}
+        tg_edit(chat_id, msg_id, "❌ <b>ПЛАТЕЖ НЕ НАЙДЕН</b>\n\n• Проверьте код\n• Транзакция идёт до 5 мин", keyboard)
 
-def handle_profile(callback, chat_id, msg_id, user_id, first_name):
-    tg_answer(callback["id"])
-    
+def handle_profile(cb, chat_id, msg_id, uid, fname):
+    tg_answer(cb["id"])
     with db_connect() as conn:
-        row = conn.execute(
-            'SELECT balance_ton, balance_stars, total_wins, total_games, total_deposited_ton FROM users WHERE user_id=?',
-            (user_id,)
-        ).fetchone()
-    
+        row = conn.execute('SELECT balance_ton, balance_stars, total_wins, total_games FROM users WHERE user_id=?', (uid,)).fetchone()
     if row:
-        ton, stars, wins, games, dep = row
+        ton, stars, wins, games = row
         wr = round((wins/games)*100) if games > 0 else 0
-        
+        keyboard = {"inline_keyboard": [
+            [{"text": "🎁 ОТКРЫВАТЬ КЕЙСЫ", "web_app": {"url": WEBAPP_URL}}],
+            [{"text": "💎 ВЫВЕСТИ", "callback_data": "wd_ton"}],
+            [{"text": "🏠 МЕНЮ", "callback_data": "menu"}]
+        ]}
         tg_edit(chat_id, msg_id,
-            f"💼 <b>ПРОФИЛЬ {first_name}</b>\n\n"
+            f"💼 <b>{fname}</b>\n\n"
             f"💎 TON: <b>{ton:.4f}</b>\n"
             f"⭐ Stars: <b>{stars}</b>\n"
-            f"📥 Пополнено: <b>{dep:.2f} TON</b>\n"
             f"🏆 Побед: <b>{wins}</b> | 🎮 Игр: <b>{games}</b>\n"
             f"📈 Win Rate: <b>{wr}%</b>",
-            {"inline_keyboard": [
-                [{"text": "💎 ВЫВЕСТИ TON", "callback_data": "wd_ton"}],
-                [{"text": "🎰 ИГРАТЬ", "web_app": {"url": WEBAPP_URL}}],
-                [{"text": "🏠 МЕНЮ", "callback_data": "menu"}]
-            ]}
+            keyboard
         )
 
-def handle_withdraw(chat_id, user_id, text):
-    try:
-        parts = text.split()
-        amount = float(parts[1])
-        wallet = parts[2] if len(parts) > 2 else None
-        
-        if not wallet: return tg_send(chat_id, "❌ /withdraw СУММА КОШЕЛЕК")
-        if amount < 10: return tg_send(chat_id, "❌ Мин: 10 TON")
-        
-        with db_connect() as conn:
-            row = conn.execute('SELECT balance_ton FROM users WHERE user_id=?', (user_id,)).fetchone()
-            if not row or row[0] < amount: return tg_send(chat_id, "❌ Недостаточно!")
-            
-            conn.execute('UPDATE users SET balance_ton=balance_ton-? WHERE user_id=?', (amount, user_id))
-            conn.execute('INSERT INTO withdrawals (user_id, amount, wallet) VALUES (?,?,?)', (user_id, amount, wallet))
-        
-        tg_send(chat_id, f"✅ Заявка на <b>{amount} TON</b> создана!")
-        tg_send(ADMIN_ID, f"📤 ВЫВОД: {amount} TON\n👤 {user_id}\n📤 {wallet}")
-    except:
-        tg_send(chat_id, "❌ /withdraw СУММА КОШЕЛЕК")
-
 # =================================================================
-# ДАННЫЕ ДЛЯ ПОДАРКОВ И NFT
-# =================================================================
-TELEGRAM_GIFTS = [
-    {"name": "🧸 Мишка", "icon": "🧸", "rarity": "common", "chance": 35, "price_ton": 0.5},
-    {"name": "❤️ Сердечко", "icon": "❤️", "rarity": "common", "chance": 30, "price_ton": 0.3},
-    {"name": "🌹 Роза", "icon": "🌹", "rarity": "common", "chance": 25, "price_ton": 0.4},
-    {"name": "💎 Кристалл", "icon": "💎", "rarity": "rare", "chance": 15, "price_ton": 1.5},
-    {"name": "👑 Корона", "icon": "👑", "rarity": "rare", "chance": 10, "price_ton": 2.0},
-    {"name": "🌟 Звезда", "icon": "🌟", "rarity": "epic", "chance": 5, "price_ton": 5.0},
-    {"name": "🐉 Дракон", "icon": "🐉", "rarity": "legendary", "chance": 1, "price_ton": 50.0},
-    {"name": "🦄 Единорог", "icon": "🦄", "rarity": "mythic", "chance": 0.5, "price_ton": 200.0},
-]
-
-NFT_ITEMS = [
-    {"name": "Bored Ape #3847", "image": "🐵", "rarity": "legendary", "chance": 0.5, "floor_price": 500},
-    {"name": "CryptoPunk #9281", "image": "👾", "rarity": "legendary", "chance": 0.3, "floor_price": 800},
-    {"name": "TON DNS Diamond", "image": "💠", "rarity": "epic", "chance": 3, "floor_price": 100},
-    {"name": "TON Punks #442", "image": "🤖", "rarity": "rare", "chance": 8, "floor_price": 50},
-    {"name": "Fragment Number", "image": "📞", "rarity": "rare", "chance": 10, "floor_price": 30},
-    {"name": "TON Diamonds", "image": "💎", "rarity": "common", "chance": 15, "floor_price": 20},
-    {"name": "Telegram Username NFT", "image": "@", "rarity": "common", "chance": 20, "floor_price": 15},
-    {"name": "Anonymous Number", "image": "#️⃣", "rarity": "common", "chance": 25, "floor_price": 10},
-]
-
-# =================================================================
-# FLASK
+# FLASK APP
 # =================================================================
 flask_app = Flask(__name__)
 
@@ -339,137 +286,75 @@ flask_app = Flask(__name__)
 def webapp():
     return render_template_string(HTML_TEMPLATE)
 
-@flask_app.route('/api/user/<int:user_id>')
-def api_user(user_id):
+@flask_app.route('/api/user/<int:uid>')
+def api_user(uid):
     try:
         with db_connect() as conn:
-            row = conn.execute(
-                'SELECT balance_ton, balance_stars, total_wins, total_games, total_deposited_ton, nft_items, gift_items FROM users WHERE user_id=?',
-                (user_id,)
-            ).fetchone()
+            row = conn.execute('SELECT balance_ton, balance_stars, total_wins, total_games, gift_items, nft_items FROM users WHERE user_id=?', (uid,)).fetchone()
         if row:
             return jsonify({
                 'balance_ton': row[0], 'balance_stars': row[1],
                 'total_wins': row[2], 'total_games': row[3],
-                'deposited_ton': row[4],
-                'nft_items': json.loads(row[5]) if row[5] else [],
-                'gift_items': json.loads(row[6]) if row[6] else []
+                'gift_items': json.loads(row[4]) if row[4] else [],
+                'nft_items': json.loads(row[5]) if row[5] else []
             })
-    except:
-        pass
-    return jsonify({'balance_ton': 100, 'balance_stars': 1000, 'total_wins': 0, 'total_games': 0, 'deposited_ton': 0, 'nft_items': [], 'gift_items': []})
+    except: pass
+    return jsonify({'balance_ton': 100, 'balance_stars': 1000, 'total_wins': 0, 'total_games': 0, 'gift_items': [], 'nft_items': []})
 
-@flask_app.route('/api/game', methods=['POST'])
-def api_game():
+@flask_app.route('/api/cases')
+def api_cases():
+    """Возвращает все кейсы"""
+    cases_list = []
+    for key, case in GIFT_CASES.items():
+        cases_list.append({
+            'id': key,
+            'name': case['name'],
+            'icon': case['icon'],
+            'price_ton': case['price_ton'],
+            'price_stars': case['price_stars'],
+            'color': case['color'],
+            'items': case['items']
+        })
+    return jsonify(cases_list)
+
+@flask_app.route('/api/open_case', methods=['POST'])
+def api_open_case():
+    """Открытие кейса"""
     data = request.json
-    user_id = data.get('user_id')
-    game_type = data.get('game_type')
-    bet = float(data.get('bet_amount', 0))
+    uid = data.get('user_id')
+    case_id = data.get('case_id')
     currency = data.get('currency', 'TON')
     
-    try:
-        with db_connect() as conn:
-            col = 'balance_ton' if currency == 'TON' else 'balance_stars'
-            row = conn.execute(f'SELECT {col} FROM users WHERE user_id=?', (user_id,)).fetchone()
-            if not row or row[0] < bet:
-                return jsonify({'error': 'Недостаточно средств!'}), 400
-            
-            win = random.choices([True, False], weights=[30, 70])[0]
-            mult, prize = 0, 0
-            
-            if win:
-                mults = [1.5, 2, 3, 5, 10]
-                wgts = [30, 30, 25, 10, 5]
-                r = random.random() * sum(wgts)
-                for i, m in enumerate(mults):
-                    r -= wgts[i]
-                    if r <= 0: mult = m; break
-                prize = bet * mult
-            
-            if win:
-                conn.execute(
-                    f'UPDATE users SET {col}={col}+?, total_wins=total_wins+1, total_games=total_games+1 WHERE user_id=?',
-                    (prize - bet, user_id)
-                )
-            else:
-                conn.execute(
-                    f'UPDATE users SET {col}={col}-?, total_games=total_games+1 WHERE user_id=?',
-                    (bet, user_id)
-                )
-            
-            return jsonify({'win': win, 'amount': prize, 'multiplier': mult})
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-@flask_app.route('/api/gift', methods=['POST'])
-def api_gift():
-    data = request.json
-    user_id = data.get('user_id')
+    if case_id not in GIFT_CASES:
+        return jsonify({'error': 'Кейс не найден!'}), 404
     
-    items = []
-    for g in TELEGRAM_GIFTS:
-        items.extend([g] * int(g['chance'] * 10))
-    
-    gift = random.choice(items)
+    case = GIFT_CASES[case_id]
+    price = case['price_ton'] if currency == 'TON' else case['price_stars']
     
     with db_connect() as conn:
-        row = conn.execute('SELECT gift_items FROM users WHERE user_id=?', (user_id,)).fetchone()
-        gifts = json.loads(row[0]) if row and row[0] else []
-        gifts.append(gift['name'])
-        conn.execute('UPDATE users SET gift_items=? WHERE user_id=?', (json.dumps(gifts), user_id))
-    
-    return jsonify({'gift': gift})
-
-@flask_app.route('/api/nft', methods=['POST'])
-def api_nft():
-    data = request.json
-    user_id = data.get('user_id')
-    
-    with db_connect() as conn:
-        row = conn.execute('SELECT balance_ton FROM users WHERE user_id=?', (user_id,)).fetchone()
-        if not row or row[0] < 20:
-            return jsonify({'error': 'Недостаточно TON! Нужно 20 TON'}), 400
+        col = 'balance_ton' if currency == 'TON' else 'balance_stars'
+        row = conn.execute(f'SELECT {col} FROM users WHERE user_id=?', (uid,)).fetchone()
         
-        items = []
-        for n in NFT_ITEMS:
-            items.extend([n] * int(n['chance'] * 10))
+        if not row or row[0] < price:
+            return jsonify({'error': f'Недостаточно {currency}!'}), 400
         
-        nft = random.choice(items)
+        # Выбор предмета по шансам
+        items_pool = []
+        for item in case['items']:
+            items_pool.extend([item] * int(item['chance'] * 10))
         
-        conn.execute('UPDATE users SET balance_ton=balance_ton-20 WHERE user_id=?', (user_id,))
-        row2 = conn.execute('SELECT nft_items FROM users WHERE user_id=?', (user_id,)).fetchone()
-        nfts = json.loads(row2[0]) if row2 and row2[0] else []
-        nfts.append(nft['name'])
-        conn.execute('UPDATE users SET nft_items=? WHERE user_id=?', (json.dumps(nfts), user_id))
+        winner = random.choice(items_pool)
+        
+        # Списываем цену
+        conn.execute(f'UPDATE users SET {col}={col}-?, total_games=total_games+1 WHERE user_id=?', (price, uid))
+        
+        # Добавляем подарок
+        row2 = conn.execute('SELECT gift_items FROM users WHERE user_id=?', (uid,)).fetchone()
+        gifts = json.loads(row2[0]) if row2 and row2[0] else []
+        gifts.append({'name': winner['name'], 'icon': winner['icon'], 'rarity': winner['rarity'], 'value': winner['value']})
+        conn.execute('UPDATE users SET gift_items=?, total_wins=total_wins+1 WHERE user_id=?', (json.dumps(gifts), uid))
     
-    return jsonify({'nft': nft})
-
-@flask_app.route('/api/gifts/list')
-def api_gifts_list():
-    return jsonify(TELEGRAM_GIFTS)
-
-@flask_app.route('/api/nft/list')
-def api_nft_list():
-    return jsonify(NFT_ITEMS)
-
-@flask_app.route('/api/check_payment', methods=['POST'])
-def api_check_payment():
-    data = request.json
-    user_id = data.get('user_id')
-    payment_id = data.get('payment_id')
-    
-    result = verify_ton_transaction(TON_WALLET, payment_id)
-    
-    if result:
-        amount = result['amount']
-        with db_connect() as conn:
-            conn.execute(
-                'UPDATE users SET balance_ton=balance_ton+?, total_deposited_ton=total_deposited_ton+?, pending_payment_id=NULL WHERE user_id=?',
-                (amount, amount, user_id)
-            )
-        return jsonify({'success': True, 'amount': amount, 'hash': result['hash'][:20]})
-    
-    return jsonify({'success': False, 'message': 'Платеж не найден'})
+    return jsonify({'winner': winner, 'case_name': case['name']})
 
 @flask_app.route('/webhook', methods=['POST'])
 def webhook():
@@ -480,49 +365,54 @@ def webhook():
             msg = update["message"]
             chat_id = msg["chat"]["id"]
             user = msg["from"]
-            user_id = user["id"]
+            uid = user["id"]
             
             if "text" in msg:
                 text = msg["text"]
                 if text.startswith("/start"):
                     handle_start(chat_id, user)
                 elif text.startswith("/withdraw"):
-                    handle_withdraw(chat_id, user_id, text)
-            
-            elif "successful_payment" in msg:
-                payment = msg["successful_payment"]
-                if payment.get("invoice_payload") == "stars_deposit":
-                    stars = payment["total_amount"]
-                    with db_connect() as conn:
-                        conn.execute(
-                            'UPDATE users SET balance_stars=balance_stars+?, balance_ton=balance_ton+? WHERE user_id=?',
-                            (stars, stars * 0.1, user_id)
-                        )
-                    tg_send(chat_id, f"✅ +{stars} Stars!")
+                    try:
+                        parts = text.split()
+                        amt = float(parts[1])
+                        wallet = parts[2] if len(parts) > 2 else None
+                        if not wallet:
+                            tg_send(chat_id, "❌ /withdraw СУММА КОШЕЛЕК")
+                        elif amt < 10:
+                            tg_send(chat_id, "❌ Мин: 10 TON")
+                        else:
+                            with db_connect() as conn:
+                                row = conn.execute('SELECT balance_ton FROM users WHERE user_id=?', (uid,)).fetchone()
+                                if not row or row[0] < amt:
+                                    tg_send(chat_id, "❌ Недостаточно!")
+                                else:
+                                    conn.execute('UPDATE users SET balance_ton=balance_ton-? WHERE user_id=?', (amt, uid))
+                                    conn.execute('INSERT INTO withdrawals (user_id, amount, wallet) VALUES (?,?,?)', (uid, amt, wallet))
+                                    tg_send(chat_id, f"✅ Заявка на <b>{amt} TON</b> создана!")
+                                    tg_send(ADMIN_ID, f"📤 ВЫВОД: {amt} TON\n👤 {uid}\n📤 {wallet}")
+                    except:
+                        tg_send(chat_id, "❌ /withdraw СУММА КОШЕЛЕК")
         
         elif "callback_query" in update:
             cb = update["callback_query"]
             chat_id = cb["message"]["chat"]["id"]
             msg_id = cb["message"]["message_id"]
-            user_id = cb["from"]["id"]
-            first_name = cb["from"].get("first_name", "Player")
+            uid = cb["from"]["id"]
+            fname = cb["from"].get("first_name", "Player")
             data = cb.get("data", "")
             
             if data == "dep_ton":
-                handle_deposit_ton(cb, chat_id, msg_id, user_id)
-            elif data == "dep_stars":
-                tg_answer(cb["id"], "⭐ Используйте кнопку в приложении")
+                handle_dep_ton(cb, chat_id, msg_id, uid)
             elif data == "profile":
-                handle_profile(cb, chat_id, msg_id, user_id, first_name)
-            elif data == "wd_ton":
-                tg_edit(chat_id, msg_id, "Отправьте:\n<code>/withdraw СУММА КОШЕЛЕК</code>", back_kb())
-                tg_answer(cb["id"])
+                handle_profile(cb, chat_id, msg_id, uid, fname)
             elif data == "menu":
-                tg_edit(chat_id, msg_id, "🔥 <b>SYNDROME CASINO</b>", menu_kb())
+                tg_edit(chat_id, msg_id, "🎁 <b>GIFT CASES</b>", {"inline_keyboard": [[{"text": "🎁 ОТКРЫВАТЬ КЕЙСЫ", "web_app": {"url": WEBAPP_URL}}]]})
+                tg_answer(cb["id"])
+            elif data == "wd_ton":
+                tg_edit(chat_id, msg_id, "💎 Отправьте:\n<code>/withdraw СУММА КОШЕЛЕК</code>")
                 tg_answer(cb["id"])
             elif data.startswith("check_"):
-                pid = data.replace("check_", "")
-                handle_check_payment(cb, chat_id, msg_id, user_id, pid)
+                handle_check(cb, chat_id, msg_id, uid, data.replace("check_", ""))
             else:
                 tg_answer(cb["id"])
         
@@ -536,304 +426,283 @@ def health():
     return jsonify({"status": "ok"})
 
 # =================================================================
-# HTML ШАБЛОН (НЕОНОВЫЙ ДИЗАЙН + ПОДАРКИ + NFT)
+# HTML — КЕЙСЫ В СТИЛЕ TELEGRAM GIFTS
 # =================================================================
 HTML_TEMPLATE = r'''<!DOCTYPE html>
 <html lang="ru">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <meta name="theme-color" content="#0a0a1a">
-    <title>SYNDROME CASINO</title>
+    <meta name="theme-color" content="#0f0f1a">
+    <title>GIFT CASES</title>
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
     <style>
-        @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=Inter:wght@300;400;600;700;900&display=swap');
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap');
         
         :root {
-            --bg: #0a0a1a;
-            --card: #12122a;
-            --neon-pink: #ff2d95;
-            --neon-blue: #00d4ff;
-            --neon-purple: #b347ea;
-            --neon-gold: #ffd700;
-            --neon-green: #00ff88;
-            --glass: rgba(255,255,255,0.05);
-            --border: rgba(255,255,255,0.1);
+            --bg: #0f0f1a;
+            --card: #1a1a2e;
+            --gold: #ffd700;
+            --accent: #7c3aed;
+            --text: #fff;
+            --sub: #9ca3af;
         }
         
         *{margin:0;padding:0;box-sizing:border-box}
-        body{background:var(--bg);color:#fff;font-family:'Inter',sans-serif;min-height:100vh;overflow-x:hidden}
+        body{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;min-height:100vh;overflow-x:hidden}
         
-        .bg-anim{position:fixed;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:0}
-        .orb{position:absolute;border-radius:50%;filter:blur(80px);opacity:0.15;animation:floatOrb 8s infinite}
-        .orb:nth-child(1){width:300px;height:300px;background:var(--neon-purple);top:10%;left:-100px;animation-delay:0s}
-        .orb:nth-child(2){width:200px;height:200px;background:var(--neon-blue);bottom:20%;right:-50px;animation-delay:3s}
-        .orb:nth-child(3){width:250px;height:250px;background:var(--neon-pink);top:50%;left:50%;animation-delay:6s}
-        @keyframes floatOrb{0%,100%{transform:translate(0,0) scale(1)}33%{transform:translate(30px,-30px) scale(1.1)}66%{transform:translate(-20px,20px) scale(0.9)}}
+        .app{max-width:440px;margin:0 auto;padding:12px;padding-bottom:40px}
         
-        .app{position:relative;z-index:1;max-width:480px;margin:0 auto;padding:16px;padding-bottom:100px}
+        /* Баланс */
+        .bal{display:flex;align-items:center;gap:8px;padding:12px 16px;background:var(--card);border-radius:16px;margin-bottom:12px}
+        .bal-icon{font-size:20px}
+        .bal-text{font-weight:700;font-size:15px}
+        .bal-ton{background:linear-gradient(135deg,var(--gold),#ffaa00);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+        .bal-stars{color:#60a5fa;margin-left:12px}
         
-        .header{display:flex;align-items:center;gap:12px;margin-bottom:16px;padding:16px;background:var(--card);border:1px solid var(--border);border-radius:20px}
-        .avatar{width:48px;height:48px;border-radius:50%;background:linear-gradient(135deg,var(--neon-purple),var(--neon-pink));display:flex;align-items:center;justify-content:center;font-size:22px;font-weight:900;box-shadow:0 0 20px rgba(179,71,234,0.4)}
-        .username{font-weight:700;font-size:15px}
-        .vip{font-size:11px;color:var(--neon-gold)}
+        /* Кейсы */
+        .cases-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:16px}
         
-        .balance-panel{position:relative;margin-bottom:16px;padding:20px;border-radius:24px;background:linear-gradient(135deg,rgba(179,71,234,0.15),rgba(0,212,255,0.1));border:1px solid rgba(179,71,234,0.3);overflow:hidden}
-        .balance-row{display:flex;justify-content:space-around;position:relative;z-index:1}
-        .bal-item{text-align:center}
-        .bal-amount{font-family:'Orbitron',monospace;font-size:26px;font-weight:900;background:linear-gradient(135deg,var(--neon-gold),#ffaa00);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
-        .bal-label{font-size:10px;text-transform:uppercase;color:#888;margin-top:4px;letter-spacing:1px}
+        .case-card{position:relative;padding:20px 14px;border-radius:20px;text-align:center;cursor:pointer;transition:all 0.3s;overflow:hidden;border:2px solid transparent}
+        .case-card:hover{transform:translateY(-4px)}
+        .case-card:active{transform:scale(0.97)}
         
-        .tabs{display:flex;gap:4px;margin-bottom:16px;padding:4px;background:var(--card);border-radius:16px}
-        .tab{flex:1;padding:10px;text-align:center;border-radius:12px;cursor:pointer;font-weight:600;font-size:13px;color:#888;border:none;background:transparent;transition:all 0.3s}
-        .tab.active{background:linear-gradient(135deg,var(--neon-purple),var(--neon-pink));color:#fff;box-shadow:0 0 20px rgba(255,45,149,0.3)}
+        .case-card.common{border-color:#9CA3AF;background:linear-gradient(180deg,rgba(156,163,175,0.15),rgba(156,163,175,0.05))}
+        .case-card.rare{border-color:#60A5FA;background:linear-gradient(180deg,rgba(96,165,250,0.15),rgba(96,165,250,0.05))}
+        .case-card.epic{border-color:#A78BFA;background:linear-gradient(180deg,rgba(167,139,250,0.15),rgba(167,139,250,0.05))}
+        .case-card.legendary{border-color:#FBBF24;background:linear-gradient(180deg,rgba(251,191,36,0.15),rgba(251,191,36,0.05))}
         
-        .tab-content{display:none}
-        .tab-content.active{display:block}
+        .case-glow{position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none}
+        .case-card.epic .case-glow{background:radial-gradient(circle at 50% 0%,rgba(167,139,250,0.3),transparent 60%)}
+        .case-card.legendary .case-glow{background:radial-gradient(circle at 50% 0%,rgba(251,191,36,0.3),transparent 60%)}
         
-        .section-title{font-size:14px;font-weight:700;margin-bottom:12px;display:flex;align-items:center;gap:8px;color:var(--neon-blue)}
-        .section-title::after{content:'';flex:1;height:1px;background:var(--border)}
+        .case-icon{font-size:48px;margin-bottom:8px;position:relative;z-index:1}
+        .case-name{font-weight:700;font-size:14px;margin-bottom:4px;position:relative;z-index:1}
+        .case-price{font-size:12px;color:var(--gold);font-weight:600;position:relative;z-index:1}
+        .case-count{font-size:10px;color:var(--sub);margin-top:2px;position:relative;z-index:1}
         
-        .games-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:16px}
-        .game-card{position:relative;padding:16px;background:var(--card);border:1px solid var(--border);border-radius:16px;text-align:center;cursor:pointer;transition:all 0.3s}
-        .game-card:hover{transform:translateY(-3px);border-color:var(--neon-purple);box-shadow:0 10px 30px rgba(179,71,234,0.2)}
-        .game-card.disabled{opacity:0.4;pointer-events:none}
-        .game-icon{font-size:36px;margin-bottom:6px}
-        .game-name{font-size:13px;font-weight:700}
-        .game-bet{font-size:10px;color:var(--neon-gold);margin-top:2px}
-        .hot-badge{position:absolute;top:8px;right:8px;padding:3px 7px;border-radius:6px;font-size:9px;font-weight:700;background:var(--neon-pink);animation:pulse 2s infinite}
-        @keyframes pulse{0%,100%{transform:scale(1)}50%{transform:scale(1.1)}}
-        
-        .gift-section,.nft-section{margin-bottom:16px;padding:16px;background:var(--card);border:1px solid var(--border);border-radius:16px}
-        .gift-grid{display:flex;gap:8px;overflow-x:auto;padding:8px 0}
-        .gift-item{flex-shrink:0;width:70px;text-align:center;padding:10px;background:var(--glass);border-radius:12px;border:1px solid var(--border)}
-        .gift-icon{font-size:30px}
-        .gift-chance{font-size:9px;color:var(--neon-gold);margin-top:2px}
-        
-        .neon-btn{width:100%;padding:14px;border:none;border-radius:14px;font-weight:700;font-size:14px;cursor:pointer;text-transform:uppercase;letter-spacing:1px;transition:all 0.3s;color:#fff}
-        .btn-purple{background:linear-gradient(135deg,var(--neon-purple),var(--neon-pink));box-shadow:0 0 25px rgba(255,45,149,0.3)}
-        .btn-gold{background:linear-gradient(135deg,var(--neon-gold),#ffaa00);color:#000}
-        .btn-blue{background:linear-gradient(135deg,var(--neon-blue),#0099ff)}
-        .neon-btn:hover{transform:translateY(-2px)}
-        
-        .modal{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.9);z-index:1000;align-items:center;justify-content:center;backdrop-filter:blur(10px)}
+        /* Модалка открытия */
+        .modal{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.9);z-index:100;align-items:center;justify-content:center;backdrop-filter:blur(10px)}
         .modal.active{display:flex}
-        .modal-content{width:90%;max-width:380px;padding:24px;background:var(--card);border:1px solid var(--border);border-radius:24px;text-align:center;position:relative;max-height:80vh;overflow-y:auto}
-        .modal-close{position:absolute;top:12px;right:12px;width:32px;height:32px;border-radius:50%;border:none;background:rgba(255,255,255,0.1);color:#fff;font-size:16px;cursor:pointer}
-        .modal-title{font-family:'Orbitron',monospace;font-size:20px;font-weight:900;margin-bottom:16px;background:linear-gradient(135deg,var(--neon-gold),var(--neon-pink));-webkit-background-clip:text;-webkit-text-fill-color:transparent}
         
-        .slot-reels{display:flex;gap:10px;justify-content:center;margin:20px 0}
-        .reel{width:70px;height:70px;display:flex;align-items:center;justify-content:center;font-size:32px;background:var(--glass);border:2px solid var(--border);border-radius:14px}
-        .reel.spin{animation:reelAnim 0.1s infinite;border-color:var(--neon-gold)}
-        @keyframes reelAnim{0%{transform:translateY(-8px)}50%{transform:translateY(8px)}100%{transform:translateY(-8px)}}
+        .modal-card{width:90%;max-width:360px;padding:30px;background:var(--card);border-radius:24px;text-align:center;position:relative;animation:popIn 0.4s ease}
+        @keyframes popIn{0%{transform:scale(0.8);opacity:0}100%{transform:scale(1);opacity:1}}
         
-        .result-win{color:var(--neon-green);font-weight:700;padding:10px;border-radius:10px;background:rgba(0,255,136,0.1)}
-        .result-lose{color:var(--neon-pink);font-weight:700;padding:10px;border-radius:10px;background:rgba(255,45,149,0.1)}
+        .modal-close{position:absolute;top:12px;right:12px;width:32px;height:32px;border-radius:50%;background:rgba(255,255,255,0.1);border:none;color:#fff;font-size:16px;cursor:pointer}
         
-        .amount-input{width:100%;padding:14px;background:var(--glass);border:2px solid var(--border);border-radius:14px;color:#fff;font-size:20px;font-weight:700;text-align:center;outline:none;font-family:'Orbitron',monospace}
-        .amount-input:focus{border-color:var(--neon-purple)}
+        .win-icon{font-size:80px;animation:winBounce 0.6s ease}
+        @keyframes winBounce{0%{transform:scale(0)}50%{transform:scale(1.2)}100%{transform:scale(1)}}
         
-        .toast{position:fixed;top:20px;left:50%;transform:translateX(-50%);padding:14px 20px;background:var(--card);border:1px solid var(--border);border-radius:14px;z-index:2000;font-weight:600;font-size:13px;text-align:center;max-width:90%;white-space:pre-line;box-shadow:0 10px 30px rgba(0,0,0,0.5)}
+        .win-name{font-size:22px;font-weight:800;margin:12px 0 4px}
+        .win-rarity{font-size:13px;font-weight:700;text-transform:uppercase;margin-bottom:6px}
+        .win-value{font-size:14px;color:var(--gold);font-weight:600;margin-bottom:20px}
         
-        .nft-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:12px 0}
-        .nft-card{padding:12px;background:var(--glass);border:1px solid var(--border);border-radius:12px;text-align:center}
-        .nft-rarity{font-size:9px;text-transform:uppercase;letter-spacing:1px;margin-top:4px}
-        .legendary{color:#ff8c00}.epic{color:var(--neon-purple)}.rare{color:var(--neon-blue)}.common{color:#888}
+        .collect-btn{display:inline-block;padding:14px 32px;border-radius:14px;background:linear-gradient(135deg,var(--accent),#a855f7);color:#fff;font-weight:700;cursor:pointer;border:none;font-size:15px;transition:all 0.3s}
+        .collect-btn:hover{transform:translateY(-2px)}
+        
+        /* Анимация открытия кейса */
+        .opening-anim{position:fixed;top:0;left:0;width:100%;height:100%;z-index:200;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,0.95)}
+        .opening-anim.active{display:flex}
+        
+        .opening-content{text-align:center}
+        .opening-icon{font-size:100px;animation:shake 0.6s ease infinite}
+        @keyframes shake{0%,100%{transform:rotate(0)}25%{transform:rotate(-10deg)}75%{transform:rotate(10deg)}}
+        
+        .opening-text{font-size:16px;font-weight:600;margin-top:20px;color:var(--sub)}
+        
+        .rarity-common{color:#9ca3af}
+        .rarity-rare{color:#60a5fa}
+        .rarity-epic{color:#a78bfa}
+        .rarity-legendary{color:#fbbf24}
+        .rarity-mythic{color:#f472b6}
+        
+        /* Коллекция */
+        .section-title{font-size:15px;font-weight:700;margin-bottom:10px;color:var(--sub);text-transform:uppercase;letter-spacing:1px}
+        .collection-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:16px}
+        
+        .collection-item{padding:10px;background:var(--card);border-radius:12px;text-align:center;border:1px solid rgba(255,255,255,0.05)}
+        .collection-icon{font-size:28px}
+        .collection-name{font-size:10px;font-weight:600;margin-top:4px}
+        
+        .toast{position:fixed;top:16px;left:50%;transform:translateX(-50%);padding:12px 20px;background:var(--card);border-radius:14px;z-index:300;font-weight:600;font-size:13px;text-align:center;border:1px solid rgba(255,255,255,0.1)}
+        
+        .currency-toggle{display:flex;gap:6px;margin-bottom:12px}
+        .curr-btn{flex:1;padding:8px;border-radius:10px;border:1px solid rgba(255,255,255,0.1);background:transparent;color:var(--sub);font-weight:600;font-size:12px;cursor:pointer;transition:all 0.3s}
+        .curr-btn.active{background:var(--accent);color:#fff;border-color:transparent}
     </style>
 </head>
 <body>
-    <div class="bg-anim"><div class="orb"></div><div class="orb"></div><div class="orb"></div></div>
-    
-    <div class="app">
-        <div class="header">
-            <div class="avatar" id="avatar">S</div>
-            <div style="flex:1"><div class="username" id="username">Player</div><div class="vip">👑 VIP</div></div>
-            <span style="font-size:22px">💎</span>
-        </div>
-        
-        <div class="balance-panel">
-            <div class="balance-row">
-                <div class="bal-item"><div class="bal-amount" id="tonBal">0.00</div><div class="bal-label">TON</div></div>
-                <div class="bal-item"><div class="bal-amount" id="starsBal">0</div><div class="bal-label">STARS</div></div>
-            </div>
-        </div>
-        
-        <div class="tabs">
-            <button class="tab active" onclick="switchTab('games')">🎰 ИГРЫ</button>
-            <button class="tab" onclick="switchTab('gifts')">🎁 ПОДАРКИ</button>
-            <button class="tab" onclick="switchTab('nft')">🖼️ NFT</button>
-            <button class="tab" onclick="switchTab('profile')">💼 ПРОФИЛЬ</button>
-        </div>
-        
-        <div class="tab-content active" id="tab-games">
-            <div class="games-grid">
-                <div class="game-card" id="card-slots" onclick="openGame('slots')"><div class="hot-badge">HOT</div><div class="game-icon">🎰</div><div class="game-name">СЛОТЫ</div><div class="game-bet" id="slotsBet">1 TON</div></div>
-                <div class="game-card" id="card-roulette" onclick="openGame('roulette')"><div class="game-icon">🎡</div><div class="game-name">РУЛЕТКА</div><div class="game-bet" id="rouletteBet">2 TON</div></div>
-                <div class="game-card" id="card-dice" onclick="openGame('dice')"><div class="game-icon">🎲</div><div class="game-name">КОСТИ</div><div class="game-bet" id="diceBet">1.5 TON</div></div>
-                <div class="game-card" id="card-blackjack" onclick="openGame('blackjack')"><div class="game-icon">🃏</div><div class="game-name">БЛЭКДЖЕК</div><div class="game-bet" id="blackjackBet">5 TON</div></div>
-            </div>
-        </div>
-        
-        <div class="tab-content" id="tab-gifts">
-            <div class="gift-section">
-                <div class="section-title">🎁 БЕСПЛАТНЫЙ ПОДАРОК</div>
-                <p style="font-size:12px;color:#888;margin-bottom:12px">Крутите бесплатно раз в день!</p>
-                <button class="neon-btn btn-purple" onclick="openFreeGift()">🎁 ОТКРЫТЬ ПОДАРОК</button>
-            </div>
-            <div class="gift-section">
-                <div class="section-title">📊 ДОСТУПНЫЕ ПОДАРКИ</div>
-                <div class="gift-grid" id="giftList"></div>
-            </div>
-        </div>
-        
-        <div class="tab-content" id="tab-nft">
-            <div class="nft-section">
-                <div class="section-title">🖼️ NFT КЕЙС (20 TON)</div>
-                <p style="font-size:12px;color:#888;margin-bottom:12px">Открывайте NFT с реальными шансами!</p>
-                <button class="neon-btn btn-gold" onclick="openNFTCase()">🔓 ОТКРЫТЬ КЕЙС (20 TON)</button>
-            </div>
-            <div class="nft-section">
-                <div class="section-title">📊 ДОСТУПНЫЕ NFT</div>
-                <div class="nft-grid" id="nftList"></div>
-            </div>
-        </div>
-        
-        <div class="tab-content" id="tab-profile">
-            <div class="gift-section">
-                <div class="section-title">💼 МОЙ ПРОФИЛЬ</div>
-                <div style="margin:8px 0"><span style="color:#888">💎 TON:</span> <b id="profTon">0</b></div>
-                <div style="margin:8px 0"><span style="color:#888">⭐ Stars:</span> <b id="profStars">0</b></div>
-                <div style="margin:8px 0"><span style="color:#888">🏆 Побед:</span> <b id="profWins">0</b></div>
-                <div style="margin:8px 0"><span style="color:#888">🎮 Игр:</span> <b id="profGames">0</b></div>
-                <div style="margin:8px 0"><span style="color:#888">🎁 Подарков:</span> <b id="profGifts">0</b></div>
-                <div style="margin:8px 0"><span style="color:#888">🖼️ NFT:</span> <b id="profNFTs">0</b></div>
-            </div>
-            <button class="neon-btn btn-purple" onclick="handleDeposit()">💰 ПОПОЛНИТЬ</button>
-            <button class="neon-btn btn-blue" onclick="handleWithdraw()" style="margin-top:8px">💎 ВЫВЕСТИ</button>
-        </div>
+<div class="app">
+    <!-- Баланс -->
+    <div class="bal">
+        <span class="bal-icon">💰</span>
+        <span class="bal-text bal-ton" id="tonDisplay">100.00 TON</span>
+        <span class="bal-text bal-stars" id="starsDisplay">⭐ 1000</span>
     </div>
     
-    <div class="modal" id="slotsModal"><div class="modal-content">
-        <button class="modal-close" onclick="closeModal()">✕</button>
-        <div class="modal-title">🎰 СЛОТЫ</div>
-        <div class="slot-reels"><div class="reel" id="r1">🍒</div><div class="reel" id="r2">🍋</div><div class="reel" id="r3">💎</div></div>
-        <div id="slotsResult"></div>
-        <button class="neon-btn btn-purple" onclick="spinSlots()">🎰 КРУТИТЬ</button>
-    </div></div>
+    <!-- Выбор валюты -->
+    <div class="currency-toggle">
+        <button class="curr-btn active" onclick="setCurrency('TON', this)">💎 TON</button>
+        <button class="curr-btn" onclick="setCurrency('STARS', this)">⭐ STARS</button>
+    </div>
     
-    <div class="modal" id="giftModal"><div class="modal-content">
-        <button class="modal-close" onclick="closeModal()">✕</button>
-        <div class="modal-title">🎁 ПОДАРОК</div>
-        <div style="font-size:80px;margin:20px 0" id="giftResult">🎁</div>
-        <div id="giftText" style="font-weight:700;font-size:18px"></div>
-    </div></div>
+    <!-- Кейсы -->
+    <div class="section-title">🎁 ДОСТУПНЫЕ КЕЙСЫ</div>
+    <div class="cases-grid" id="casesGrid"></div>
     
-    <div class="modal" id="nftModal"><div class="modal-content">
-        <button class="modal-close" onclick="closeModal()">✕</button>
-        <div class="modal-title">🖼️ NFT КЕЙС</div>
-        <div style="font-size:80px;margin:20px 0" id="nftResult">🖼️</div>
-        <div id="nftText" style="font-weight:700;font-size:18px"></div>
-    </div></div>
+    <!-- Коллекция -->
+    <div class="section-title">📦 МОЯ КОЛЛЕКЦИЯ</div>
+    <div class="collection-grid" id="collectionGrid">
+        <div style="text-align:center;padding:20px;color:var(--sub);grid-column:1/-1">Открывайте кейсы чтобы собирать коллекцию!</div>
+    </div>
     
-    <div class="toast" id="toast" style="display:none"></div>
+    <!-- Кнопки -->
+    <button style="width:100%;padding:14px;margin-top:8px;border-radius:14px;background:linear-gradient(135deg,#ffd700,#ffaa00);color:#000;font-weight:700;border:none;cursor:pointer;font-size:14px" onclick="tg.openTelegramLink('https://t.me/nft_takes_gifts_bot')">💰 ПОПОЛНИТЬ</button>
+</div>
 
-    <script>
-        const tg=window.Telegram.WebApp;tg.expand();tg.ready();
-        const user=tg.initDataUnsafe?.user||{};
-        const userId=user.id||123456789;
-        document.getElementById('username').textContent=user.first_name||'Player';
-        document.getElementById('avatar').textContent=(user.first_name||'P')[0].toUpperCase();
+<!-- Анимация открытия -->
+<div class="opening-anim" id="openingAnim">
+    <div class="opening-content">
+        <div class="opening-icon" id="openingIcon">📦</div>
+        <div class="opening-text">Открываем кейс...</div>
+    </div>
+</div>
+
+<!-- Модалка результата -->
+<div class="modal" id="resultModal">
+    <div class="modal-card">
+        <button class="modal-close" onclick="closeResult()">✕</button>
+        <div class="win-icon" id="resultIcon">🎁</div>
+        <div class="win-name" id="resultName">Подарок</div>
+        <div class="win-rarity" id="resultRarity">COMMON</div>
+        <div class="win-value" id="resultValue">0.5 TON</div>
+        <button class="collect-btn" onclick="closeResult()">🎉 ЗАБРАТЬ!</button>
+    </div>
+</div>
+
+<div class="toast" id="toast" style="display:none"></div>
+
+<script>
+const tg=window.Telegram.WebApp;tg.expand();tg.ready();
+const user=tg.initDataUnsafe?.user||{};
+const uid=user.id||123456;
+
+let ton=100,stars=1000,gifts=[],currency='TON';
+
+function toast(m){const t=document.getElementById('toast');t.textContent=m;t.style.display='block';setTimeout(()=>t.style.display='none',2500)}
+
+async function load(){
+    try{const r=await fetch('/api/user/'+uid);const d=await r.json();
+        ton=d.balance_ton||100;stars=d.balance_stars||1000;gifts=d.gift_items||[];
+        updateUI()}catch(e){updateUI()}
+}
+
+function updateUI(){
+    document.getElementById('tonDisplay').textContent=ton.toFixed(2)+' TON';
+    document.getElementById('starsDisplay').textContent='⭐ '+stars;
+    
+    // Коллекция
+    const grid=document.getElementById('collectionGrid');
+    if(gifts.length>0){
+        grid.innerHTML=gifts.map(g=>`
+            <div class="collection-item">
+                <div class="collection-icon">${g.icon||'🎁'}</div>
+                <div class="collection-name">${g.name||'Подарок'}</div>
+                <div style="font-size:9px;color:var(--sub);margin-top:2px">${g.rarity||'common'}</div>
+            </div>`).join('');
+    }else{
+        grid.innerHTML='<div style="text-align:center;padding:20px;color:var(--sub);grid-column:1/-1">Открывайте кейсы чтобы собирать коллекцию!</div>';
+    }
+    
+    buildCases();
+}
+
+function setCurrency(c,btn){
+    currency=c;
+    document.querySelectorAll('.curr-btn').forEach(b=>b.classList.remove('active'));
+    btn.classList.add('active');
+    buildCases();
+}
+
+function buildCases(){
+    fetch('/api/cases').then(r=>r.json()).then(cases=>{
+        document.getElementById('casesGrid').innerHTML=cases.map(c=>{
+            const price=currency==='TON'?c.price_ton:c.price_stars;
+            const balance=currency==='TON'?ton:stars;
+            const canOpen=balance>=price;
+            
+            return `<div class="case-card ${c.id}" onclick="openCase('${c.id}')" style="${canOpen?'':'opacity:0.5;pointer-events:none'}">
+                <div class="case-glow"></div>
+                <div class="case-icon">${c.icon}</div>
+                <div class="case-name">${c.name}</div>
+                <div class="case-price">${price} ${currency}</div>
+                <div class="case-count">${c.items.length} предметов</div>
+            </div>`;
+        }).join('');
+    });
+}
+
+async function openCase(caseId){
+    const price=currency==='TON'?{common:1,rare:5,epic:15,legendary:50}[caseId]:{common:10,rare:50,epic:150,legendary:500}[caseId];
+    const balance=currency==='TON'?ton:stars;
+    
+    if(balance<price){toast('❌ Недостаточно '+currency+'!');return}
+    
+    // Анимация открытия
+    const anim=document.getElementById('openingAnim');
+    const icon=document.getElementById('openingIcon');
+    anim.classList.add('active');
+    
+    const icons=['📦','🎁','✨','👑','💎','🌟'];
+    for(let i=0;i<15;i++){
+        icon.textContent=icons[Math.floor(Math.random()*icons.length)];
+        await new Promise(r=>setTimeout(r,100));
+    }
+    
+    // Запрос к серверу
+    const r=await fetch('/api/open_case',{
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({user_id:uid,case_id:caseId,currency:currency})
+    });
+    
+    const d=await r.json();
+    
+    if(d.error){
+        anim.classList.remove('active');
+        toast('❌ '+d.error);
+        return;
+    }
+    
+    // Списываем баланс
+    if(currency==='TON')ton-=price;
+    else stars-=price;
+    
+    // Добавляем подарок
+    gifts.push({name:d.winner.name,icon:d.winner.icon,rarity:d.winner.rarity,value:d.winner.value});
+    
+    // Показываем результат
+    setTimeout(()=>{
+        anim.classList.remove('active');
         
-        let ton=100,stars=1000,wins=0,games=0,gifts=[],nfts=[],spinning=false;
+        document.getElementById('resultIcon').textContent=d.winner.icon;
+        document.getElementById('resultName').textContent=d.winner.name;
+        document.getElementById('resultRarity').innerHTML=`<span class="rarity-${d.winner.rarity}">${d.winner.rarity.toUpperCase()}</span>`;
+        document.getElementById('resultValue').textContent='💰 '+d.winner.value+' TON';
+        document.getElementById('resultModal').classList.add('active');
         
-        function toast(m){const t=document.getElementById('toast');t.textContent=m;t.style.display='block';setTimeout(()=>t.style.display='none',3000)}
-        
-        async function load(){
-            try{const r=await fetch('/api/user/'+userId);const d=await r.json();
-                ton=d.balance_ton||100;stars=d.balance_stars||1000;wins=d.total_wins||0;games=d.total_games||0;
-                gifts=d.gift_items||[];nfts=d.nft_items||[];updateUI()}catch(e){updateUI()}
-        }
-        
-        function updateUI(){
-            document.getElementById('tonBal').textContent=ton.toFixed(2);
-            document.getElementById('starsBal').textContent=stars;
-            document.getElementById('profTon').textContent=ton.toFixed(2);
-            document.getElementById('profStars').textContent=stars;
-            document.getElementById('profWins').textContent=wins;
-            document.getElementById('profGames').textContent=games;
-            document.getElementById('profGifts').textContent=gifts.length;
-            document.getElementById('profNFTs').textContent=nfts.length;
-            ['slots','roulette','dice','blackjack'].forEach(g=>{
-                const c=document.getElementById('card-'+g);
-                const bets={slots:1,roulette:2,dice:1.5,blackjack:5};
-                ton<bets[g]?c.classList.add('disabled'):c.classList.remove('disabled')
-            })
-        }
-        
-        function switchTab(t){
-            document.querySelectorAll('.tab').forEach(b=>b.classList.remove('active'));
-            event.target.classList.add('active');
-            document.querySelectorAll('.tab-content').forEach(c=>c.classList.remove('active'));
-            document.getElementById('tab-'+t).classList.add('active');
-            if(t==='gifts')loadGiftList();
-            if(t==='nft')loadNFTList();
-        }
-        
-        function openGame(g){document.getElementById(g+'Modal').classList.add('active')}
-        function closeModal(){document.querySelectorAll('.modal').forEach(m=>m.classList.remove('active'));spinning=false}
-        
-        async function loadGiftList(){
-            const r=await fetch('/api/gifts/list');const data=await r.json();
-            document.getElementById('giftList').innerHTML=data.map(g=>`<div class="gift-item"><div class="gift-icon">${g.icon}</div><div style="font-size:10px;font-weight:600">${g.name.split(' ')[0]}</div><div class="gift-chance">${g.chance}%</div></div>`).join('')
-        }
-        
-        async function loadNFTList(){
-            const r=await fetch('/api/nft/list');const data=await r.json();
-            document.getElementById('nftList').innerHTML=data.map(n=>`<div class="nft-card"><div style="font-size:28px">${n.image}</div><div style="font-size:11px;font-weight:600">${n.name}</div><div class="nft-rarity ${n.rarity}">${n.rarity} • ${n.chance}%</div><div style="font-size:10px;color:#888">Floor: ${n.floor_price} TON</div></div>`).join('')
-        }
-        
-        async function openFreeGift(){
-            const r=await fetch('/api/gift',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({user_id:userId})});
-            const d=await r.json();
-            document.getElementById('giftResult').textContent=d.gift.icon;
-            document.getElementById('giftText').textContent=d.gift.name+' ('+d.gift.rarity+')';
-            document.getElementById('giftModal').classList.add('active');
-            gifts.push(d.gift.name);updateUI()
-        }
-        
-        async function openNFTCase(){
-            if(ton<20){toast('❌ Нужно 20 TON!');return}
-            const r=await fetch('/api/nft',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({user_id:userId})});
-            const d=await r.json();
-            if(d.error){toast(d.error);return}
-            document.getElementById('nftResult').textContent=d.nft.image;
-            document.getElementById('nftText').innerHTML=d.nft.name+'<br><span class="'+d.nft.rarity+'">'+d.nft.rarity.toUpperCase()+'</span><br>Floor: '+d.nft.floor_price+' TON';
-            document.getElementById('nftModal').classList.add('active');
-            ton-=20;nfts.push(d.nft.name);updateUI()
-        }
-        
-        async function spinSlots(){
-            if(spinning||ton<1)return;spinning=true;
-            const reels=[document.getElementById('r1'),document.getElementById('r2'),document.getElementById('r3')];
-            const sym=["🍒","🍋","🔔","💎","7️⃣"];
-            reels.forEach(r=>r.classList.add('spin'));
-            for(let i=0;i<15;i++){reels.forEach(r=>r.textContent=sym[Math.floor(Math.random()*5)]);await new Promise(r=>setTimeout(r,80))}
-            reels.forEach(r=>r.classList.remove('spin'));
-            try{
-                const r=await fetch('/api/game',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({user_id:userId,game_type:'slots',bet_amount:1,currency:'TON'})});
-                const d=await r.json();
-                if(d.win){ton+=d.amount-1;wins++;reels.forEach(r=>r.textContent='💎');document.getElementById('slotsResult').innerHTML='<div class="result-win">🎉 +'+d.amount.toFixed(2)+' TON!</div>'}
-                else{ton-=1;document.getElementById('slotsResult').innerHTML='<div class="result-lose">😢 -1 TON</div>'}
-                games++;updateUI();spinning=false
-            }catch(e){spinning=false}
-        }
-        
-        function handleDeposit(){tg.openTelegramLink('https://t.me/nft_takes_gifts_bot')}
-        function handleWithdraw(){tg.openTelegramLink('https://t.me/nft_takes_gifts_bot');toast('Отправьте боту:\n/withdraw СУММА КОШЕЛЕК')}
-        
-        document.querySelectorAll('.modal').forEach(m=>m.addEventListener('click',function(e){if(e.target===this)closeModal()}));
-        load();setInterval(load,30000)
-    </script>
+        updateUI();
+    },1800);
+}
+
+function closeResult(){
+    document.getElementById('resultModal').classList.remove('active');
+}
+
+// Инициализация
+load();
+setInterval(load,30000);
+</script>
 </body>
 </html>'''
 
@@ -848,18 +717,13 @@ def keep_alive():
 
 if __name__ == '__main__':
     init_db()
-    
-    # Установка вебхука
     try:
         requests.get(f"{TELEGRAM_API}/setWebhook", params={"url": f"https://{RENDER_URL}/webhook", "drop_pending_updates": True})
-        requests.post(f"{TELEGRAM_API}/setChatMenuButton", json={"menu_button": json.dumps({"type":"web_app","text":"🎰 ИГРАТЬ","web_app":{"url":WEBAPP_URL}})})
-        requests.post(f"{TELEGRAM_API}/setMyCommands", json={"commands":[{"command":"start","description":"🚀 Запустить"},{"command":"withdraw","description":"💎 Вывести"}]})
-        logger.info("✅ Webhook set!")
+        requests.post(f"{TELEGRAM_API}/setChatMenuButton", json={"menu_button": json.dumps({"type":"web_app","text":"🎁 КЕЙСЫ","web_app":{"url":WEBAPP_URL}})})
+        logger.info("Webhook set!")
     except Exception as e:
-        logger.error(f"Setup error: {e}")
+        logger.error(f"Setup: {e}")
     
-    # Авто-пинг
     threading.Thread(target=keep_alive, daemon=True).start()
-    
     port = int(os.environ.get('PORT', 8080))
     flask_app.run(host='0.0.0.0', port=port)

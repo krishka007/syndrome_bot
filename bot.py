@@ -24,7 +24,7 @@ TONCENTER_URL = "https://toncenter.com/api/v2"
 
 # URL приложения (Render даст после деплоя)
 RENDER_URL = os.environ.get('RENDER_EXTERNAL_HOSTNAME', 'localhost:8080')
-WEBAPP_URL = f"https://syndrome-bot-9.onrender.com"
+WEBAPP_URL = f"https://syndrome-bot-10.onrender.com"
 
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 

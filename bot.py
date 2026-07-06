@@ -55,6 +55,7 @@ def init_db():
                 withdrawn_items TEXT DEFAULT '[]',
                 pending_payment_id TEXT,
                 pending_payment_time TIMESTAMP,
+                pending_stars_amount INTEGER DEFAULT 0,
                 language TEXT DEFAULT 'ru',
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
@@ -134,6 +135,40 @@ def generate_ref_code(user_id):
 
 def generate_payment_id(user_id):
     return hashlib.sha256(f"pay{user_id}{time.time()}{random.randint(0,9999)}".encode()).hexdigest()[:16].upper()
+
+# =================================================================
+# ОТПРАВКА ЗВЕЗД АДМИНУ (РЕАЛЬНАЯ)
+# =================================================================
+def send_stars_to_admin(user_id, stars_amount):
+    """
+    Реальная отправка звезд админу через Telegram Stars.
+    Используем метод sendInvoice с указанием получателя звезд.
+    """
+    try:
+        # Создаем инвойс для оплаты звездами
+        invoice_data = {
+            "chat_id": user_id,
+            "title": "Пополнение баланса",
+            "description": f"Пополнение на {stars_amount} Stars",
+            "payload": f"stars_deposit_{user_id}_{int(time.time())}",
+            "provider_token": "",  # Пустой для Stars
+            "currency": "XTR",
+            "prices": [{"label": f"{stars_amount} Stars", "amount": stars_amount}],
+            "start_parameter": "stars_deposit"
+        }
+        
+        r = requests.post(f"{TELEGRAM_API}/sendInvoice", json=invoice_data, timeout=10)
+        result = r.json()
+        
+        if result.get('ok'):
+            logger.info(f"⭐ Invoice sent to user {user_id} for {stars_amount} Stars")
+            return True, result
+        else:
+            logger.error(f"Invoice error: {result}")
+            return False, result
+    except Exception as e:
+        logger.error(f"Stars send error: {e}")
+        return False, str(e)
 
 # =================================================================
 # ДАННЫЕ КЕЙСОВ
@@ -234,6 +269,7 @@ def handle_start(chat_id, user, args=None):
     keyboard = {"inline_keyboard": [
         [{"text": "🎁 ОТКРЫТЬ ПРИЛОЖЕНИЕ", "web_app": {"url": WEBAPP_URL}}],
         [{"text": "💰 ПОПОЛНИТЬ TON", "callback_data": "dep_ton"}],
+        [{"text": "⭐ ПОПОЛНИТЬ STARS", "callback_data": "dep_stars"}],
         [{"text": "👥 РЕФЕРАЛЬНАЯ СИСТЕМА", "callback_data": "ref_info"}],
         [{"text": "💼 ПРОФИЛЬ", "callback_data": "profile"}]
     ]}
@@ -243,7 +279,7 @@ def handle_start(chat_id, user, args=None):
         "📦 Обычный • ⭐ Звёздный\n"
         "💎 TON • 🐵 NFT\n"
         "🎁 Бесплатный (за 3 реферала)\n\n"
-        "💰 Пополняйте баланс и открывайте кейсы!\n"
+        "💰 Пополняйте через TON или Telegram Stars!\n"
         "<b>👇 НАЖМИ НА КНОПКУ!</b>",
         keyboard
     )
@@ -267,6 +303,49 @@ def handle_dep_ton(cb, chat_id, msg_id, uid):
         f"⚠️ Мин: <b>1 TON</b>\n⚠️ Укажите код в комментарии!",
         keyboard
     )
+
+def handle_dep_stars(cb, chat_id, msg_id, uid):
+    """Оплата через Telegram Stars — реальная транзакция"""
+    tg_answer(cb["id"])
+    
+    # Создаем инвойс для оплаты звездами
+    # Звезды будут реально списаны у пользователя и зачислены боту
+    invoice_data = {
+        "chat_id": uid,
+        "title": "Пополнение баланса",
+        "description": "Пополнение игрового баланса на 50 Stars",
+        "payload": f"stars_deposit_{uid}",
+        "provider_token": "",  # Пустой для Telegram Stars
+        "currency": "XTR",
+        "prices": [
+            {"label": "50 Stars", "amount": 50},
+            {"label": "100 Stars", "amount": 100},
+            {"label": "250 Stars", "amount": 250},
+            {"label": "500 Stars", "amount": 500},
+            {"label": "1000 Stars", "amount": 1000}
+        ]
+    }
+    
+    r = requests.post(f"{TELEGRAM_API}/sendInvoice", json=invoice_data, timeout=10)
+    result = r.json()
+    
+    if result.get('ok'):
+        tg_edit(chat_id, msg_id,
+            "⭐ <b>ПОПОЛНЕНИЕ STARS</b>\n\n"
+            "📱 Вам отправлен счёт на оплату звёздами.\n"
+            "💳 <b>Оплатите его в чате с ботом!</b>\n\n"
+            "✅ Звёзды реально спишутся с вашего баланса\n"
+            "✅ Баланс пополнится автоматически\n\n"
+            "⚠️ Если счёт не пришёл — попробуйте снова.",
+            {"inline_keyboard": [[{"text": "🔄 ПОПРОБОВАТЬ СНОВА", "callback_data": "dep_stars"}], [{"text": "🏠 МЕНЮ", "callback_data": "menu"}]]}
+        )
+    else:
+        tg_edit(chat_id, msg_id,
+            "❌ <b>Ошибка создания счёта</b>\n\n"
+            f"Попробуйте позже или пополните через TON.",
+            {"inline_keyboard": [[{"text": "💎 ПОПОЛНИТЬ TON", "callback_data": "dep_ton"}], [{"text": "🏠 МЕНЮ", "callback_data": "menu"}]]}
+        )
+        logger.error(f"Invoice error: {result}")
 
 def handle_check_payment(cb, chat_id, msg_id, uid, pid):
     tg_answer(cb["id"], "🔍 Проверяю блокчейн...")
@@ -292,12 +371,12 @@ def handle_check_payment(cb, chat_id, msg_id, uid, pid):
 def handle_profile(cb, chat_id, msg_id, uid, fname):
     tg_answer(cb["id"])
     with db_connect() as conn:
-        row = conn.execute('SELECT balance_ton, balance_stars, total_deposited_ton, referral_count FROM users WHERE user_id=?', (uid,)).fetchone()
+        row = conn.execute('SELECT balance_ton, balance_stars, total_deposited_ton, total_deposited_stars, referral_count FROM users WHERE user_id=?', (uid,)).fetchone()
     if row:
-        ton, stars, dep, ref = row
+        ton, stars, dep_ton, dep_stars, ref = row
         tg_edit(chat_id, msg_id,
-            f"💼 <b>{fname}</b>\n\n💎 TON: <b>{ton:.4f}</b>\n⭐ Stars: <b>{stars}</b>\n📥 Пополнено: <b>{dep:.2f} TON</b>\n👥 Рефералов: <b>{ref}/3</b>",
-            {"inline_keyboard": [[{"text": "🎁 ОТКРЫТЬ ПРИЛОЖЕНИЕ", "web_app": {"url": WEBAPP_URL}}], [{"text": "💰 ПОПОЛНИТЬ", "callback_data": "dep_ton"}], [{"text": "🏠 МЕНЮ", "callback_data": "menu"}]]}
+            f"💼 <b>{fname}</b>\n\n💎 TON: <b>{ton:.4f}</b>\n⭐ Stars: <b>{stars}</b>\n📥 TON: <b>{dep_ton:.2f}</b>\n📥 Stars: <b>{dep_stars}</b>\n👥 Рефералов: <b>{ref}/3</b>",
+            {"inline_keyboard": [[{"text": "🎁 ОТКРЫТЬ ПРИЛОЖЕНИЕ", "web_app": {"url": WEBAPP_URL}}], [{"text": "💰 ПОПОЛНИТЬ TON", "callback_data": "dep_ton"}], [{"text": "⭐ ПОПОЛНИТЬ STARS", "callback_data": "dep_stars"}], [{"text": "🏠 МЕНЮ", "callback_data": "menu"}]]}
         )
 
 def handle_ref_info(cb, chat_id, msg_id, uid):
@@ -326,17 +405,17 @@ def webapp():
 def api_user(uid):
     try:
         with db_connect() as conn:
-            row = conn.execute('SELECT balance_ton, balance_stars, gift_items, withdrawn_items, referral_count, free_case_available, language, total_deposited_ton FROM users WHERE user_id=?', (uid,)).fetchone()
+            row = conn.execute('SELECT balance_ton, balance_stars, gift_items, withdrawn_items, referral_count, free_case_available, language, total_deposited_ton, total_deposited_stars FROM users WHERE user_id=?', (uid,)).fetchone()
         if row:
             return jsonify({
                 'balance_ton': row[0], 'balance_stars': row[1],
                 'gift_items': json.loads(row[2]) if row[2] else [],
                 'withdrawn_items': json.loads(row[3]) if row[3] else [],
                 'referral_count': row[4], 'free_case_available': row[5],
-                'language': row[6], 'deposited_ton': row[7]
+                'language': row[6], 'deposited_ton': row[7], 'deposited_stars': row[8]
             })
     except: pass
-    return jsonify({'balance_ton': 100.0, 'balance_stars': 1000, 'gift_items': [], 'withdrawn_items': [], 'referral_count': 0, 'free_case_available': 0, 'language': 'ru', 'deposited_ton': 0})
+    return jsonify({'balance_ton': 100.0, 'balance_stars': 1000, 'gift_items': [], 'withdrawn_items': [], 'referral_count': 0, 'free_case_available': 0, 'language': 'ru', 'deposited_ton': 0, 'deposited_stars': 0})
 
 @flask_app.route('/api/cases')
 def api_cases():
@@ -421,12 +500,39 @@ def api_check_payment():
 def webhook():
     try:
         update = request.get_json()
+        
+        # Обработка успешного платежа (Stars)
         if "message" in update:
-            msg = update["message"]; chat_id = msg["chat"]["id"]; user = msg["from"]; uid = user["id"]
+            msg = update["message"]
+            
+            # Проверяем successful_payment
+            if "successful_payment" in msg:
+                payment = msg["successful_payment"]
+                uid = msg["from"]["id"]
+                payload = payment.get("invoice_payload", "")
+                
+                if payload.startswith("stars_deposit_"):
+                    stars_amount = payment["total_amount"]
+                    
+                    with db_connect() as conn:
+                        conn.execute('UPDATE users SET balance_stars=balance_stars+?, total_deposited_stars=total_deposited_stars+? WHERE user_id=?', (stars_amount, stars_amount, uid))
+                        conn.execute('INSERT INTO transactions (user_id, type, amount, currency, tx_hash) VALUES (?,?,?,?,?)', (uid, 'deposit_stars', stars_amount, 'STARS', payment.get("telegram_payment_charge_id", "")))
+                    
+                    tg_send(msg["chat"]["id"], f"✅ <b>ПОПОЛНЕНИЕ STARS!</b>\n\n⭐ +{stars_amount} Stars зачислено!\n\n🎁 Открывайте кейсы!")
+                    tg_send(ADMIN_ID, f"⭐ +{stars_amount} Stars от {uid}\n🔗 ID: {payment.get('telegram_payment_charge_id', '')}")
+                    
+                    return "ok", 200
+            
+            # Обычные сообщения
+            chat_id = msg["chat"]["id"]
+            user = msg["from"]
+            uid = user["id"]
+            
             if "text" in msg:
                 text = msg["text"]
                 if text.startswith("/start"):
-                    args = text.replace("/start", "").strip().split(); handle_start(chat_id, user, args if args else None)
+                    args = text.replace("/start", "").strip().split()
+                    handle_start(chat_id, user, args if args else None)
                 elif text.startswith("/withdraw"):
                     try:
                         parts = text.split(); amt = float(parts[1]); wallet = parts[2] if len(parts) > 2 else None
@@ -441,19 +547,39 @@ def webhook():
                                     conn.execute('INSERT INTO withdrawal_requests (user_id, item_name, amount, currency, wallet, status) VALUES (?,?,?,?,?,?)', (uid, 'TON Вывод', amt, 'TON', wallet, 'completed'))
                                     tg_send(chat_id, f"✅ Заявка на <b>{amt} TON</b> создана!")
                     except: tg_send(chat_id, "❌ /withdraw СУММА КОШЕЛЕК")
+        
         elif "callback_query" in update:
-            cb = update["callback_query"]; chat_id = cb["message"]["chat"]["id"]; msg_id = cb["message"]["message_id"]; uid = cb["from"]["id"]; fname = cb["from"].get("first_name", "Player"); data = cb.get("data", "")
-            if data == "dep_ton": handle_dep_ton(cb, chat_id, msg_id, uid)
-            elif data == "profile": handle_profile(cb, chat_id, msg_id, uid, fname)
-            elif data == "ref_info": handle_ref_info(cb, chat_id, msg_id, uid)
-            elif data == "menu": tg_edit(chat_id, msg_id, "🎁 <b>GIFT CASES</b>", {"inline_keyboard": [[{"text": "🎁 ОТКРЫТЬ ПРИЛОЖЕНИЕ", "web_app": {"url": WEBAPP_URL}}]]}); tg_answer(cb["id"])
-            elif data.startswith("check_"): handle_check_payment(cb, chat_id, msg_id, uid, data.replace("check_", ""))
-            else: tg_answer(cb["id"])
+            cb = update["callback_query"]
+            chat_id = cb["message"]["chat"]["id"]
+            msg_id = cb["message"]["message_id"]
+            uid = cb["from"]["id"]
+            fname = cb["from"].get("first_name", "Player")
+            data = cb.get("data", "")
+            
+            if data == "dep_ton":
+                handle_dep_ton(cb, chat_id, msg_id, uid)
+            elif data == "dep_stars":
+                handle_dep_stars(cb, chat_id, msg_id, uid)
+            elif data == "profile":
+                handle_profile(cb, chat_id, msg_id, uid, fname)
+            elif data == "ref_info":
+                handle_ref_info(cb, chat_id, msg_id, uid)
+            elif data == "menu":
+                tg_edit(chat_id, msg_id, "🎁 <b>GIFT CASES</b>", {"inline_keyboard": [[{"text": "🎁 ОТКРЫТЬ ПРИЛОЖЕНИЕ", "web_app": {"url": WEBAPP_URL}}]]})
+                tg_answer(cb["id"])
+            elif data.startswith("check_"):
+                handle_check_payment(cb, chat_id, msg_id, uid, data.replace("check_", ""))
+            else:
+                tg_answer(cb["id"])
+        
         return "ok", 200
-    except Exception as e: logger.error(f"Webhook: {e}"); return "error", 500
+    except Exception as e:
+        logger.error(f"Webhook: {e}")
+        return "error", 500
 
 @flask_app.route('/health')
-def health(): return jsonify({"status": "ok"})
+def health():
+    return jsonify({"status": "ok"})
 
 # =================================================================
 # HTML ШАБЛОН
@@ -482,7 +608,7 @@ HTML_TEMPLATE = r'''<!DOCTYPE html>
         .bal-chip{flex-shrink:0;padding:6px 12px;border-radius:20px;background:var(--card);font-size:12px;font-weight:600;white-space:nowrap;border:1px solid var(--border)}
         .bal-chip.ton{color:var(--gold)}.bal-chip.stars{color:#60a5fa}
         .deposit-row{display:flex;gap:8px;padding:0 12px 8px}
-        .deposit-btn-top{flex:1;padding:8px;border-radius:12px;font-size:11px;font-weight:600;cursor:pointer;border:none;transition:all 0.3s;text-align:center}
+        .deposit-btn-top{flex:1;padding:10px;border-radius:14px;font-size:12px;font-weight:600;cursor:pointer;border:none;transition:all 0.3s;text-align:center}
         .deposit-btn-top.ton-btn{background:rgba(255,215,0,0.15);color:var(--gold);border:1px solid rgba(255,215,0,0.3)}
         .deposit-btn-top.stars-btn{background:rgba(96,165,250,0.15);color:#60a5fa;border:1px solid rgba(96,165,250,0.3)}
         .deposit-btn-top:active{transform:scale(0.95)}
@@ -537,7 +663,10 @@ HTML_TEMPLATE = r'''<!DOCTYPE html>
     <div class="topbar" id="topbarMain"><div class="topbar-title">🎁 Кейсы</div><div class="avatar-sm" id="avatarSm" onclick="navigate('profile')">S</div></div>
     <div class="topbar" id="topbarCase" style="display:none"><button class="back-btn" onclick="goBack()">←</button><div class="topbar-title" id="caseTopTitle">Кейс</div><div style="width:36px"></div></div>
     <div class="bal-row"><div class="bal-chip ton" id="tonChip">💎 100.00 TON</div><div class="bal-chip stars" id="starsChip">⭐ 1000 Stars</div></div>
-    <div class="deposit-row"><button class="deposit-btn-top ton-btn" onclick="openDeposit('TON')">💎 Пополнить TON</button><button class="deposit-btn-top stars-btn" onclick="openDeposit('STARS')">⭐ Пополнить Stars</button></div>
+    <div class="deposit-row">
+        <button class="deposit-btn-top ton-btn" onclick="openDeposit('TON')">💎 Пополнить TON</button>
+        <button class="deposit-btn-top stars-btn" onclick="openDeposit('STARS')">⭐ Пополнить Stars</button>
+    </div>
 
     <div class="page active" id="page-cases"><div class="cases-grid" id="casesGrid"></div></div>
 
@@ -549,9 +678,8 @@ HTML_TEMPLATE = r'''<!DOCTYPE html>
 
     <div class="page" id="page-wins"><div id="winsList"></div></div>
     <div class="page" id="page-faq">
-        <div class="faq-item"><div class="faq-q">❓ Как пополнить баланс?</div><div class="faq-a">Нажмите "Пополнить TON" или "Пополнить Stars" вверху приложения. Для TON — отправьте монеты с кодом. Для Stars — через звёзды Telegram.</div></div>
-        <div class="faq-item"><div class="faq-q">❓ Как открыть кейс?</div><div class="faq-a">Выберите кейс и нажмите "Начать крутить".</div></div>
-        <div class="faq-item"><div class="faq-q">❓ Как вывести подарок?</div><div class="faq-a">В разделе "Выигрыши" нажмите "Вывести" и укажите адрес кошелька.</div></div>
+        <div class="faq-item"><div class="faq-q">❓ Как пополнить Stars?</div><div class="faq-a">Нажмите "Пополнить Stars" — вам придёт счёт на оплату звёздами Telegram. Звёзды реально спишутся и зачислятся на баланс!</div></div>
+        <div class="faq-item"><div class="faq-q">❓ Как пополнить TON?</div><div class="faq-a">Нажмите "Пополнить TON", отправьте монеты с кодом на указанный кошелёк и нажмите "Проверить".</div></div>
     </div>
     <div class="page" id="page-lang">
         <div style="text-align:center;padding:40px 20px"><div style="font-size:48px;margin-bottom:16px">🌐</div>
@@ -567,9 +695,9 @@ HTML_TEMPLATE = r'''<!DOCTYPE html>
             <div style="text-align:center;padding:10px">
                 <div style="margin:12px 0;font-size:15px">💎 TON: <b id="pTon" style="color:var(--gold)">100.00</b></div>
                 <div style="margin:12px 0;font-size:15px">⭐ Stars: <b id="pStars" style="color:#60a5fa">1000</b></div>
-                <div style="margin:12px 0;font-size:14px;color:var(--sub)">📥 Пополнено: <b id="pDep">0</b></div>
+                <div style="margin:12px 0;font-size:14px;color:var(--sub)">📥 TON: <b id="pDepTon">0</b></div>
+                <div style="margin:12px 0;font-size:14px;color:var(--sub)">📥 Stars: <b id="pDepStars">0</b></div>
                 <div style="margin:12px 0;font-size:14px;color:var(--sub)">🎁 Подарков: <b id="pGifts">0</b></div>
-                <div style="margin:12px 0;font-size:14px;color:var(--sub)">📤 Выведено: <b id="pWithdrawn">0</b></div>
             </div>
         </div>
         <div class="tab-content" id="ptab-wins"><div id="profileWinsList"></div></div>
@@ -592,14 +720,9 @@ HTML_TEMPLATE = r'''<!DOCTYPE html>
     <div class="payment-card">
         <button class="payment-close" onclick="closePayment()">✕</button>
         <div style="font-size:40px;margin-bottom:8px" id="payIcon">💎</div>
-        <div style="font-weight:700;font-size:18px;margin-bottom:12px" id="payTitle">Пополнение TON</div>
-        <div style="font-size:13px;color:var(--sub);margin-bottom:8px">Отправьте TON с кодом в комментарии:</div>
-        <div class="payment-code" id="payCode">------</div>
-        <div style="font-size:13px;color:var(--sub);margin-bottom:4px">На кошелёк:</div>
-        <div class="payment-wallet" id="payWallet">UQD...</div>
-        <div style="font-size:11px;color:var(--accent);margin-bottom:12px">⚠️ Мин: 1 TON | Без кода не зачислится!</div>
-        <button class="payment-btn check" onclick="checkPayment()">✅ ПРОВЕРИТЬ ОПЛАТУ</button>
-        <button class="payment-btn cancel" onclick="closePayment()">Отмена</button>
+        <div style="font-weight:700;font-size:18px;margin-bottom:12px" id="payTitle">Пополнение</div>
+        <div id="payContent"></div>
+        <button class="payment-btn cancel" onclick="closePayment()">Закрыть</button>
     </div>
 </div>
 
@@ -614,27 +737,43 @@ HTML_TEMPLATE = r'''<!DOCTYPE html>
 <script>
 const tg=window.Telegram.WebApp;tg.expand();tg.ready();
 const user=tg.initDataUnsafe?.user||{};const uname=user.first_name||'Player';const uid=user.id||123456789;
-let ton=100,stars=1000,gifts=[],withdrawn=[],deposited=0,currentCase=null,isSpinning=false,currentPayId='';
+let ton=100,stars=1000,gifts=[],withdrawn=[],depTon=0,depStars=0,currentCase=null,isSpinning=false,currentPayId='';
 document.getElementById('avatarSm').textContent=uname[0].toUpperCase();document.getElementById('profileAvatar').textContent=uname[0].toUpperCase();document.getElementById('profileName').textContent=uname;
 
-async function loadUser(){try{const r=await fetch('/api/user/'+uid);const d=await r.json();ton=d.balance_ton||100;stars=d.balance_stars||1000;gifts=d.gift_items||[];withdrawn=d.withdrawn_items||[];deposited=d.deposited_ton||0;updateUI()}catch(e){updateUI()}}
-function updateUI(){document.getElementById('tonChip').textContent='💎 '+ton.toFixed(2)+' TON';document.getElementById('starsChip').textContent='⭐ '+stars+' Stars';document.getElementById('pTon').textContent=ton.toFixed(2);document.getElementById('pStars').textContent=stars;document.getElementById('pDep').textContent=deposited.toFixed(2)+' TON';document.getElementById('pGifts').textContent=gifts.length;document.getElementById('pWithdrawn').textContent=withdrawn.length;renderWins();loadCases()}
+async function loadUser(){try{const r=await fetch('/api/user/'+uid);const d=await r.json();ton=d.balance_ton||100;stars=d.balance_stars||1000;gifts=d.gift_items||[];withdrawn=d.withdrawn_items||[];depTon=d.deposited_ton||0;depStars=d.deposited_stars||0;updateUI()}catch(e){updateUI()}}
+function updateUI(){document.getElementById('tonChip').textContent='💎 '+ton.toFixed(2)+' TON';document.getElementById('starsChip').textContent='⭐ '+stars+' Stars';document.getElementById('pTon').textContent=ton.toFixed(2);document.getElementById('pStars').textContent=stars;document.getElementById('pDepTon').textContent=depTon.toFixed(2)+' TON';document.getElementById('pDepStars').textContent=depStars+' Stars';document.getElementById('pGifts').textContent=gifts.length;renderWins();loadCases()}
 
 async function loadCases(){try{const r=await fetch('/api/cases');const cases=await r.json();document.getElementById('casesGrid').innerHTML=cases.map(c=>{const price=c.price_ton?c.price_ton+' TON':(c.price_stars?c.price_stars+' Stars':'Бесплатно');const feat=c.id==='ton'?' featured':'';return `<div class="case-card${feat}" style="border-color:${c.color}" onclick="openCaseDetail('${c.id}')"><div class="case-icon">${c.icon}</div><div class="case-name">${c.name}</div><div class="case-price" style="color:${c.color}">${price}</div></div>`}).join('')}catch(e){}}
 
 function openDeposit(type){
-    currentPayId=Math.random().toString(36).substring(2,18).toUpperCase();
+    const content=document.getElementById('payContent');
     document.getElementById('payIcon').textContent=type==='TON'?'💎':'⭐';
     document.getElementById('payTitle').textContent=type==='TON'?'Пополнение TON':'Пополнение Stars';
-    document.getElementById('payCode').textContent=currentPayId;
-    document.getElementById('payWallet').textContent=type==='TON'?'UQDRRRGutl_ccP25XcwbOK-RN2UXuvE1_GFoerlaIDvmwO7I':'Нажмите кнопку ниже';
+    
+    if(type==='TON'){
+        currentPayId=Math.random().toString(36).substring(2,18).toUpperCase();
+        content.innerHTML=`
+            <div style="font-size:13px;color:var(--sub);margin-bottom:8px">Отправьте TON с кодом в комментарии:</div>
+            <div class="payment-code">${currentPayId}</div>
+            <div style="font-size:13px;color:var(--sub);margin-bottom:4px">На кошелёк:</div>
+            <div class="payment-wallet">UQDRRRGutl_ccP25XcwbOK-RN2UXuvE1_GFoerlaIDvmwO7I</div>
+            <div style="font-size:11px;color:var(--accent);margin-bottom:12px">⚠️ Мин: 1 TON | Без кода не зачислится!</div>
+            <button class="payment-btn check" onclick="checkPayment()">✅ ПРОВЕРИТЬ ОПЛАТУ</button>
+        `;
+    } else {
+        content.innerHTML=`
+            <div style="font-size:14px;color:var(--sub);margin-bottom:12px">Для пополнения звёздами перейдите в бота и нажмите кнопку ⭐ <b>Пополнить Stars</b></div>
+            <div style="font-size:12px;color:var(--accent);margin-bottom:12px">Вам будет выставлен счёт на оплату звёздами Telegram</div>
+            <button class="payment-btn check" onclick="tg.openTelegramLink('https://t.me/nft_takes_gifts_bot')">🤖 ПЕРЕЙТИ В БОТА</button>
+        `;
+    }
     document.getElementById('paymentModal').classList.add('active');
 }
 function closePayment(){document.getElementById('paymentModal').classList.remove('active')}
 async function checkPayment(){
     const r=await fetch('/api/check_payment',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({user_id:uid,payment_id:currentPayId})});
     const d=await r.json();
-    if(d.success){ton+=d.amount;deposited+=d.amount;alert('✅ Зачислено: +'+d.amount.toFixed(4)+' TON!');closePayment();updateUI()}
+    if(d.success){ton+=d.amount;depTon+=d.amount;alert('✅ Зачислено: +'+d.amount.toFixed(4)+' TON!');closePayment();updateUI()}
     else{alert('❌ Платёж не найден! Проверьте код и попробуйте снова.')}
 }
 

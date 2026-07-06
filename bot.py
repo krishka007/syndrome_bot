@@ -34,7 +34,7 @@ TONCENTER_URL = "https://toncenter.com/api/v2"
 
 # URL приложения (Render даст после деплоя)
 RENDER_URL = os.environ.get('RENDER_EXTERNAL_HOSTNAME', 'localhost:8080')
-WEBAPP_URL = f"https://syndrome-bot-7.onrender.com"
+WEBAPP_URL = f"https://syndrome-bot-8.onrender.com"
 
 logger.info(f"Starting bot. URL: {WEBAPP_URL}")
 logger.info(f"Python version: {sys.version}")

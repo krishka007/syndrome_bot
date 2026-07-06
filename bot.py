@@ -24,7 +24,7 @@ TONCENTER_API_KEY = "12237ee2c684a00cd473582230a4d9efea8b51b6baf2322883e4ef52f5d
 TONCENTER_URL = "https://toncenter.com/api/v2"
 
 RENDER_URL = os.environ.get('RENDER_EXTERNAL_HOSTNAME', 'syndrome-bot-9.onrender.com')
-WEBAPP_URL = "https://syndrome-bot-9.onrender.com"
+WEBAPP_URL = "https://syndrome-bot-12.onrender.com"
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 BOT_USERNAME = "nft_takes_gifts_bot"
 

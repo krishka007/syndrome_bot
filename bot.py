@@ -24,7 +24,7 @@ TONCENTER_API_KEY = "12237ee2c684a00cd473582230a4d9efea8b51b6baf2322883e4ef52f5d
 TONCENTER_URL = "https://toncenter.com/api/v2"
 
 RENDER_URL = os.environ.get('RENDER_EXTERNAL_HOSTNAME', 'syndrome-bot-9.onrender.com')
-WEBAPP_URL = "https://syndrome-bot-16.onrender.com"
+WEBAPP_URL = "https://syndrome-bot-17.onrender.com"
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 BOT_USERNAME = "nft_takes_gifts_bot"
 
@@ -43,8 +43,8 @@ def init_db():
                 user_id INTEGER PRIMARY KEY,
                 username TEXT,
                 first_name TEXT,
-                balance_ton REAL DEFAULT 100.0,
-                balance_stars INTEGER DEFAULT 1000,
+                balance_ton REAL DEFAULT 0,
+                balance_stars INTEGER DEFAULT 0,
                 total_deposited_ton REAL DEFAULT 0,
                 total_deposited_stars INTEGER DEFAULT 0,
                 referral_code TEXT UNIQUE,
@@ -55,7 +55,6 @@ def init_db():
                 withdrawn_items TEXT DEFAULT '[]',
                 pending_payment_id TEXT,
                 pending_payment_time TIMESTAMP,
-                pending_stars_amount INTEGER DEFAULT 0,
                 language TEXT DEFAULT 'ru',
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
@@ -76,6 +75,14 @@ def init_db():
                 amount REAL,
                 currency TEXT,
                 wallet TEXT,
+                status TEXT DEFAULT 'pending',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE IF NOT EXISTS stars_payments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                stars_amount INTEGER,
+                charge_id TEXT,
                 status TEXT DEFAULT 'pending',
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
@@ -137,42 +144,17 @@ def generate_payment_id(user_id):
     return hashlib.sha256(f"pay{user_id}{time.time()}{random.randint(0,9999)}".encode()).hexdigest()[:16].upper()
 
 # =================================================================
-# ОТПРАВКА ЗВЕЗД АДМИНУ (РЕАЛЬНАЯ)
-# =================================================================
-def send_stars_to_admin(user_id, stars_amount):
-    """
-    Реальная отправка звезд админу через Telegram Stars.
-    Используем метод sendInvoice с указанием получателя звезд.
-    """
-    try:
-        # Создаем инвойс для оплаты звездами
-        invoice_data = {
-            "chat_id": user_id,
-            "title": "Пополнение баланса",
-            "description": f"Пополнение на {stars_amount} Stars",
-            "payload": f"stars_deposit_{user_id}_{int(time.time())}",
-            "provider_token": "",  # Пустой для Stars
-            "currency": "XTR",
-            "prices": [{"label": f"{stars_amount} Stars", "amount": stars_amount}],
-            "start_parameter": "stars_deposit"
-        }
-        
-        r = requests.post(f"{TELEGRAM_API}/sendInvoice", json=invoice_data, timeout=10)
-        result = r.json()
-        
-        if result.get('ok'):
-            logger.info(f"⭐ Invoice sent to user {user_id} for {stars_amount} Stars")
-            return True, result
-        else:
-            logger.error(f"Invoice error: {result}")
-            return False, result
-    except Exception as e:
-        logger.error(f"Stars send error: {e}")
-        return False, str(e)
-
-# =================================================================
 # ДАННЫЕ КЕЙСОВ
 # =================================================================
+GIFT_ICONS = {
+    "🧸 Мишка": "🧸", "❤️ Сердечко": "❤️", "🌹 Роза": "🌹", "🎂 Тортик": "🎂",
+    "💍 Кольцо": "💍", "💎 Кристалл": "💎", "15 Звёзд": "⭐", "30 Звёзд": "🌟",
+    "50 Звёзд": "💫", "75 Звёзд": "✨", "150 Звёзд": "💎", "350 Звёзд": "👑",
+    "1 TON": "💎", "3 TON": "💎", "5 TON": "💎", "8 TON": "💎",
+    "15 TON": "💎", "30 TON": "💎", "🐵 NFT Обезьяна": "🐵", "🐍 NFT Змейка": "🐍",
+    "🎄 NFT Новый Год": "🎄", "🎃 NFT Хэллоуин": "🎃", "💩 Ничего": "💩",
+}
+
 ALL_CASES = {
     "regular": {
         "id": "regular", "name": "Обычный кейс", "icon": "📦",
@@ -261,10 +243,7 @@ def handle_start(chat_id, user, args=None):
                     if ref_count and ref_count[0] >= 3:
                         conn.execute('UPDATE users SET free_case_available=1 WHERE user_id=?', (referred_by,))
             
-            conn.execute('''
-                INSERT INTO users (user_id, username, first_name, referral_code, referred_by, balance_stars, balance_ton)
-                VALUES (?, ?, ?, ?, ?, 50, 1.0)
-            ''', (uid, uname, fname, my_ref, referred_by))
+            conn.execute('INSERT INTO users (user_id, username, first_name, referral_code, referred_by, balance_stars, balance_ton) VALUES (?, ?, ?, ?, ?, 0, 0)', (uid, uname, fname, my_ref, referred_by))
     
     keyboard = {"inline_keyboard": [
         [{"text": "🎁 ОТКРЫТЬ ПРИЛОЖЕНИЕ", "web_app": {"url": WEBAPP_URL}}],
@@ -274,15 +253,7 @@ def handle_start(chat_id, user, args=None):
         [{"text": "💼 ПРОФИЛЬ", "callback_data": "profile"}]
     ]}
     
-    tg_send(chat_id, 
-        "🎁 <b>GIFT CASES — КЕЙСЫ ПОДАРКОВ</b>\n\n"
-        "📦 Обычный • ⭐ Звёздный\n"
-        "💎 TON • 🐵 NFT\n"
-        "🎁 Бесплатный (за 3 реферала)\n\n"
-        "💰 Пополняйте через TON или Telegram Stars!\n"
-        "<b>👇 НАЖМИ НА КНОПКУ!</b>",
-        keyboard
-    )
+    tg_send(chat_id, "🎁 <b>GIFT CASES — КЕЙСЫ ПОДАРКОВ</b>\n\n📦 Обычный • ⭐ Звёздный\n💎 TON • 🐵 NFT\n🎁 Бесплатный (за 3 реферала)\n\n💰 Пополняйте через TON или Telegram Stars!\n🆕 Новые пользователи: баланс 0\n\n<b>👇 НАЖМИ НА КНОПКУ!</b>", keyboard)
 
 def handle_dep_ton(cb, chat_id, msg_id, uid):
     tg_answer(cb["id"])
@@ -296,26 +267,17 @@ def handle_dep_ton(cb, chat_id, msg_id, uid):
         [{"text": "🏠 МЕНЮ", "callback_data": "menu"}]
     ]}
     
-    tg_edit(chat_id, msg_id,
-        f"💎 <b>ПОПОЛНЕНИЕ TON</b>\n\n"
-        f"📤 Кошелёк:\n<code>{TON_WALLET}</code>\n\n"
-        f"📝 Код:\n<code>{pid}</code>\n\n"
-        f"⚠️ Мин: <b>1 TON</b>\n⚠️ Укажите код в комментарии!",
-        keyboard
-    )
+    tg_edit(chat_id, msg_id, f"💎 <b>ПОПОЛНЕНИЕ TON</b>\n\n📤 Кошелёк:\n<code>{TON_WALLET}</code>\n\n📝 Код:\n<code>{pid}</code>\n\n⚠️ Мин: <b>1 TON</b>\n⚠️ Укажите код в комментарии!", keyboard)
 
 def handle_dep_stars(cb, chat_id, msg_id, uid):
-    """Оплата через Telegram Stars — реальная транзакция"""
     tg_answer(cb["id"])
     
-    # Создаем инвойс для оплаты звездами
-    # Звезды будут реально списаны у пользователя и зачислены боту
     invoice_data = {
         "chat_id": uid,
         "title": "Пополнение баланса",
-        "description": "Пополнение игрового баланса на 50 Stars",
+        "description": "Пополнение игрового баланса звёздами Telegram",
         "payload": f"stars_deposit_{uid}",
-        "provider_token": "",  # Пустой для Telegram Stars
+        "provider_token": "",
         "currency": "XTR",
         "prices": [
             {"label": "50 Stars", "amount": 50},
@@ -330,22 +292,9 @@ def handle_dep_stars(cb, chat_id, msg_id, uid):
     result = r.json()
     
     if result.get('ok'):
-        tg_edit(chat_id, msg_id,
-            "⭐ <b>ПОПОЛНЕНИЕ STARS</b>\n\n"
-            "📱 Вам отправлен счёт на оплату звёздами.\n"
-            "💳 <b>Оплатите его в чате с ботом!</b>\n\n"
-            "✅ Звёзды реально спишутся с вашего баланса\n"
-            "✅ Баланс пополнится автоматически\n\n"
-            "⚠️ Если счёт не пришёл — попробуйте снова.",
-            {"inline_keyboard": [[{"text": "🔄 ПОПРОБОВАТЬ СНОВА", "callback_data": "dep_stars"}], [{"text": "🏠 МЕНЮ", "callback_data": "menu"}]]}
-        )
+        tg_edit(chat_id, msg_id, "⭐ <b>ПОПОЛНЕНИЕ STARS</b>\n\n📱 Вам отправлен счёт на оплату звёздами.\n💳 <b>Оплатите его в чате с ботом!</b>\n\n✅ Звёзды реально спишутся\n✅ Баланс пополнится автоматически", {"inline_keyboard": [[{"text": "🔄 ПОПРОБОВАТЬ СНОВА", "callback_data": "dep_stars"}], [{"text": "🏠 МЕНЮ", "callback_data": "menu"}]]})
     else:
-        tg_edit(chat_id, msg_id,
-            "❌ <b>Ошибка создания счёта</b>\n\n"
-            f"Попробуйте позже или пополните через TON.",
-            {"inline_keyboard": [[{"text": "💎 ПОПОЛНИТЬ TON", "callback_data": "dep_ton"}], [{"text": "🏠 МЕНЮ", "callback_data": "menu"}]]}
-        )
-        logger.error(f"Invoice error: {result}")
+        tg_edit(chat_id, msg_id, "❌ <b>Ошибка создания счёта</b>\n\nПопробуйте позже.", {"inline_keyboard": [[{"text": "💎 ПОПОЛНИТЬ TON", "callback_data": "dep_ton"}], [{"text": "🏠 МЕНЮ", "callback_data": "menu"}]]})
 
 def handle_check_payment(cb, chat_id, msg_id, uid, pid):
     tg_answer(cb["id"], "🔍 Проверяю блокчейн...")
@@ -357,16 +306,10 @@ def handle_check_payment(cb, chat_id, msg_id, uid, pid):
             conn.execute('UPDATE users SET balance_ton=balance_ton+?, total_deposited_ton=total_deposited_ton+?, pending_payment_id=NULL WHERE user_id=?', (amt, amt, uid))
             conn.execute('INSERT INTO transactions (user_id, type, amount, currency, tx_hash) VALUES (?,?,?,?,?)', (uid, 'deposit_ton', amt, 'TON', result['hash'][:20]))
         
-        tg_edit(chat_id, msg_id,
-            f"✅ <b>ЗАЧИСЛЕНО!</b>\n\n💰 +{amt:.4f} TON\n\n🎁 Открывайте кейсы!",
-            {"inline_keyboard": [[{"text": "🎁 ОТКРЫТЬ ПРИЛОЖЕНИЕ", "web_app": {"url": WEBAPP_URL}}]]}
-        )
+        tg_edit(chat_id, msg_id, f"✅ <b>ЗАЧИСЛЕНО!</b>\n\n💰 +{amt:.4f} TON\n\n🎁 Открывайте кейсы!", {"inline_keyboard": [[{"text": "🎁 ОТКРЫТЬ ПРИЛОЖЕНИЕ", "web_app": {"url": WEBAPP_URL}}]]})
         tg_send(ADMIN_ID, f"💰 +{amt:.4f} TON от {uid}")
     else:
-        tg_edit(chat_id, msg_id,
-            "❌ <b>ПЛАТЕЖ НЕ НАЙДЕН</b>\n\n• Проверьте код\n• Мин: 1 TON",
-            {"inline_keyboard": [[{"text": "🔄 ПРОВЕРИТЬ СНОВА", "callback_data": f"check_{pid}"}], [{"text": "💎 НОВЫЙ КОД", "callback_data": "dep_ton"}]]}
-        )
+        tg_edit(chat_id, msg_id, "❌ <b>ПЛАТЕЖ НЕ НАЙДЕН</b>\n\n• Проверьте код\n• Мин: 1 TON", {"inline_keyboard": [[{"text": "🔄 ПРОВЕРИТЬ СНОВА", "callback_data": f"check_{pid}"}], [{"text": "💎 НОВЫЙ КОД", "callback_data": "dep_ton"}]]})
 
 def handle_profile(cb, chat_id, msg_id, uid, fname):
     tg_answer(cb["id"])
@@ -374,10 +317,7 @@ def handle_profile(cb, chat_id, msg_id, uid, fname):
         row = conn.execute('SELECT balance_ton, balance_stars, total_deposited_ton, total_deposited_stars, referral_count FROM users WHERE user_id=?', (uid,)).fetchone()
     if row:
         ton, stars, dep_ton, dep_stars, ref = row
-        tg_edit(chat_id, msg_id,
-            f"💼 <b>{fname}</b>\n\n💎 TON: <b>{ton:.4f}</b>\n⭐ Stars: <b>{stars}</b>\n📥 TON: <b>{dep_ton:.2f}</b>\n📥 Stars: <b>{dep_stars}</b>\n👥 Рефералов: <b>{ref}/3</b>",
-            {"inline_keyboard": [[{"text": "🎁 ОТКРЫТЬ ПРИЛОЖЕНИЕ", "web_app": {"url": WEBAPP_URL}}], [{"text": "💰 ПОПОЛНИТЬ TON", "callback_data": "dep_ton"}], [{"text": "⭐ ПОПОЛНИТЬ STARS", "callback_data": "dep_stars"}], [{"text": "🏠 МЕНЮ", "callback_data": "menu"}]]}
-        )
+        tg_edit(chat_id, msg_id, f"💼 <b>{fname}</b>\n\n💎 TON: <b>{ton:.4f}</b>\n⭐ Stars: <b>{stars}</b>\n📥 TON: <b>{dep_ton:.2f}</b>\n📥 Stars: <b>{dep_stars}</b>\n👥 Рефералов: <b>{ref}/3</b>", {"inline_keyboard": [[{"text": "🎁 ОТКРЫТЬ ПРИЛОЖЕНИЕ", "web_app": {"url": WEBAPP_URL}}], [{"text": "💰 ПОПОЛНИТЬ TON", "callback_data": "dep_ton"}], [{"text": "⭐ ПОПОЛНИТЬ STARS", "callback_data": "dep_stars"}], [{"text": "🏠 МЕНЮ", "callback_data": "menu"}]]})
 
 def handle_ref_info(cb, chat_id, msg_id, uid):
     tg_answer(cb["id"])
@@ -387,10 +327,7 @@ def handle_ref_info(cb, chat_id, msg_id, uid):
         ref_code, ref_count = row
         ref_link = f"https://t.me/{BOT_USERNAME}?start={ref_code}"
         need = max(0, 3 - ref_count)
-        tg_edit(chat_id, msg_id,
-            f"👥 <b>РЕФЕРАЛЬНАЯ СИСТЕМА</b>\n\nПригласите 3 друзей — получите <b>БЕСПЛАТНЫЙ КЕЙС</b>!\n\n🔗 Ваша ссылка:\n<code>{ref_link}</code>\n\n📊 Приглашено: <b>{ref_count}/3</b>\n{'✅ Бесплатный кейс доступен!' if ref_count >= 3 else '❌ Пригласите ещё ' + str(need)}",
-            {"inline_keyboard": [[{"text": "📤 ПОДЕЛИТЬСЯ", "switch_inline_query": ref_code}], [{"text": "🎁 ОТКРЫТЬ ПРИЛОЖЕНИЕ", "web_app": {"url": WEBAPP_URL}}]]}
-        )
+        tg_edit(chat_id, msg_id, f"👥 <b>РЕФЕРАЛЬНАЯ СИСТЕМА</b>\n\nПригласите 3 друзей — получите <b>БЕСПЛАТНЫЙ КЕЙС</b>!\n\n🔗 Ваша ссылка:\n<code>{ref_link}</code>\n\n📊 Приглашено: <b>{ref_count}/3</b>\n{'✅ Бесплатный кейс доступен!' if ref_count >= 3 else '❌ Пригласите ещё ' + str(need)}", {"inline_keyboard": [[{"text": "📤 ПОДЕЛИТЬСЯ", "switch_inline_query": ref_code}], [{"text": "🎁 ОТКРЫТЬ ПРИЛОЖЕНИЕ", "web_app": {"url": WEBAPP_URL}}]]})
 
 # =================================================================
 # FLASK APP
@@ -407,15 +344,9 @@ def api_user(uid):
         with db_connect() as conn:
             row = conn.execute('SELECT balance_ton, balance_stars, gift_items, withdrawn_items, referral_count, free_case_available, language, total_deposited_ton, total_deposited_stars FROM users WHERE user_id=?', (uid,)).fetchone()
         if row:
-            return jsonify({
-                'balance_ton': row[0], 'balance_stars': row[1],
-                'gift_items': json.loads(row[2]) if row[2] else [],
-                'withdrawn_items': json.loads(row[3]) if row[3] else [],
-                'referral_count': row[4], 'free_case_available': row[5],
-                'language': row[6], 'deposited_ton': row[7], 'deposited_stars': row[8]
-            })
+            return jsonify({'balance_ton': row[0], 'balance_stars': row[1], 'gift_items': json.loads(row[2]) if row[2] else [], 'withdrawn_items': json.loads(row[3]) if row[3] else [], 'referral_count': row[4], 'free_case_available': row[5], 'language': row[6], 'deposited_ton': row[7], 'deposited_stars': row[8]})
     except: pass
-    return jsonify({'balance_ton': 100.0, 'balance_stars': 1000, 'gift_items': [], 'withdrawn_items': [], 'referral_count': 0, 'free_case_available': 0, 'language': 'ru', 'deposited_ton': 0, 'deposited_stars': 0})
+    return jsonify({'balance_ton': 0, 'balance_stars': 0, 'gift_items': [], 'withdrawn_items': [], 'referral_count': 0, 'free_case_available': 0, 'language': 'ru', 'deposited_ton': 0, 'deposited_stars': 0})
 
 @flask_app.route('/api/cases')
 def api_cases():
@@ -427,17 +358,21 @@ def api_open_case():
     uid = data.get('user_id')
     case_id = data.get('case_id')
     currency = data.get('currency', 'TON')
+    is_demo = data.get('demo_mode', False)
+    
     if case_id not in ALL_CASES: return jsonify({'error': 'Кейс не найден!'}), 404
     case = ALL_CASES[case_id]
+    
     with db_connect() as conn:
         row = conn.execute('SELECT balance_ton, balance_stars, free_case_available, gift_items FROM users WHERE user_id=?', (uid,)).fetchone()
         if not row: return jsonify({'error': 'Пользователь не найден!'}), 404
         ton_bal, stars_bal, free_avail, gifts_json = row
         gifts = json.loads(gifts_json) if gifts_json else []
+        
         if case_id == 'free':
             if free_avail <= 0: return jsonify({'error': 'Нужно пригласить 3 друзей!'}), 400
             conn.execute('UPDATE users SET free_case_available=0 WHERE user_id=?', (uid,))
-        else:
+        elif not is_demo:
             price = case.get('price_ton', 0) if currency == 'TON' else case.get('price_stars', 0)
             if currency == 'TON' and ton_bal < price: return jsonify({'error': 'Недостаточно TON!'}), 400
             if currency == 'STARS' and stars_bal < price: return jsonify({'error': 'Недостаточно Stars!'}), 400
@@ -445,11 +380,15 @@ def api_open_case():
         
         pool = []; [pool.extend([item] * int(item['chance'] * 10)) for item in case['items']]
         winner = random.choice(pool)
-        gifts.append({'name': winner['name'], 'icon': winner['icon'], 'value_stars': winner.get('value_stars', 0), 'value_ton': winner.get('value_ton', 0), 'timestamp': datetime.now().isoformat()})
-        conn.execute('UPDATE users SET gift_items=? WHERE user_id=?', (json.dumps(gifts), uid))
+        
+        if not is_demo:
+            gifts.append({'name': winner['name'], 'icon': winner['icon'], 'value_stars': winner.get('value_stars', 0), 'value_ton': winner.get('value_ton', 0), 'timestamp': datetime.now().isoformat()})
+            conn.execute('UPDATE users SET gift_items=? WHERE user_id=?', (json.dumps(gifts), uid))
+        
         new_ton = conn.execute('SELECT balance_ton FROM users WHERE user_id=?', (uid,)).fetchone()[0]
         new_stars = conn.execute('SELECT balance_stars FROM users WHERE user_id=?', (uid,)).fetchone()[0]
-    return jsonify({'winner': winner, 'balance_ton': new_ton, 'balance_stars': new_stars})
+    
+    return jsonify({'winner': winner, 'balance_ton': new_ton, 'balance_stars': new_stars, 'is_demo': is_demo})
 
 @flask_app.route('/api/sell_item', methods=['POST'])
 def api_sell_item():
@@ -484,28 +423,14 @@ def api_language():
     with db_connect() as conn: conn.execute('UPDATE users SET language=? WHERE user_id=?', (lang, uid))
     return jsonify({'success': True})
 
-@flask_app.route('/api/check_payment', methods=['POST'])
-def api_check_payment():
-    data = request.json; uid = data.get('user_id'); pid = data.get('payment_id')
-    result = verify_ton_transaction(TON_WALLET, pid)
-    if result:
-        amt = result['amount']
-        with db_connect() as conn:
-            conn.execute('UPDATE users SET balance_ton=balance_ton+?, total_deposited_ton=total_deposited_ton+?, pending_payment_id=NULL WHERE user_id=?', (amt, amt, uid))
-            conn.execute('INSERT INTO transactions (user_id, type, amount, currency, tx_hash) VALUES (?,?,?,?,?)', (uid, 'deposit_ton', amt, 'TON', result['hash'][:20]))
-        return jsonify({'success': True, 'amount': amt})
-    return jsonify({'success': False, 'message': 'Платеж не найден'})
-
 @flask_app.route('/webhook', methods=['POST'])
 def webhook():
     try:
         update = request.get_json()
         
-        # Обработка успешного платежа (Stars)
         if "message" in update:
             msg = update["message"]
             
-            # Проверяем successful_payment
             if "successful_payment" in msg:
                 payment = msg["successful_payment"]
                 uid = msg["from"]["id"]
@@ -517,13 +442,13 @@ def webhook():
                     with db_connect() as conn:
                         conn.execute('UPDATE users SET balance_stars=balance_stars+?, total_deposited_stars=total_deposited_stars+? WHERE user_id=?', (stars_amount, stars_amount, uid))
                         conn.execute('INSERT INTO transactions (user_id, type, amount, currency, tx_hash) VALUES (?,?,?,?,?)', (uid, 'deposit_stars', stars_amount, 'STARS', payment.get("telegram_payment_charge_id", "")))
+                        conn.execute('INSERT INTO stars_payments (user_id, stars_amount, charge_id, status) VALUES (?,?,?,?)', (uid, stars_amount, payment.get("telegram_payment_charge_id", ""), 'completed'))
                     
                     tg_send(msg["chat"]["id"], f"✅ <b>ПОПОЛНЕНИЕ STARS!</b>\n\n⭐ +{stars_amount} Stars зачислено!\n\n🎁 Открывайте кейсы!")
-                    tg_send(ADMIN_ID, f"⭐ +{stars_amount} Stars от {uid}\n🔗 ID: {payment.get('telegram_payment_charge_id', '')}")
+                    tg_send(ADMIN_ID, f"⭐ +{stars_amount} Stars от {uid}")
                     
                     return "ok", 200
             
-            # Обычные сообщения
             chat_id = msg["chat"]["id"]
             user = msg["from"]
             uid = user["id"]
@@ -556,21 +481,13 @@ def webhook():
             fname = cb["from"].get("first_name", "Player")
             data = cb.get("data", "")
             
-            if data == "dep_ton":
-                handle_dep_ton(cb, chat_id, msg_id, uid)
-            elif data == "dep_stars":
-                handle_dep_stars(cb, chat_id, msg_id, uid)
-            elif data == "profile":
-                handle_profile(cb, chat_id, msg_id, uid, fname)
-            elif data == "ref_info":
-                handle_ref_info(cb, chat_id, msg_id, uid)
-            elif data == "menu":
-                tg_edit(chat_id, msg_id, "🎁 <b>GIFT CASES</b>", {"inline_keyboard": [[{"text": "🎁 ОТКРЫТЬ ПРИЛОЖЕНИЕ", "web_app": {"url": WEBAPP_URL}}]]})
-                tg_answer(cb["id"])
-            elif data.startswith("check_"):
-                handle_check_payment(cb, chat_id, msg_id, uid, data.replace("check_", ""))
-            else:
-                tg_answer(cb["id"])
+            if data == "dep_ton": handle_dep_ton(cb, chat_id, msg_id, uid)
+            elif data == "dep_stars": handle_dep_stars(cb, chat_id, msg_id, uid)
+            elif data == "profile": handle_profile(cb, chat_id, msg_id, uid, fname)
+            elif data == "ref_info": handle_ref_info(cb, chat_id, msg_id, uid)
+            elif data == "menu": tg_edit(chat_id, msg_id, "🎁 <b>GIFT CASES</b>", {"inline_keyboard": [[{"text": "🎁 ОТКРЫТЬ ПРИЛОЖЕНИЕ", "web_app": {"url": WEBAPP_URL}}]]}); tg_answer(cb["id"])
+            elif data.startswith("check_"): handle_check_payment(cb, chat_id, msg_id, uid, data.replace("check_", ""))
+            else: tg_answer(cb["id"])
         
         return "ok", 200
     except Exception as e:
@@ -578,8 +495,7 @@ def webhook():
         return "error", 500
 
 @flask_app.route('/health')
-def health():
-    return jsonify({"status": "ok"})
+def health(): return jsonify({"status": "ok"})
 
 # =================================================================
 # HTML ШАБЛОН
@@ -596,7 +512,7 @@ HTML_TEMPLATE = r'''<!DOCTYPE html>
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap');
         :root{--bg:#0a0a1a;--card:#141428;--gold:#ffd700;--accent:#7c3aed;--text:#fff;--sub:#888;--border:rgba(255,255,255,0.06)}
         *{margin:0;padding:0;box-sizing:border-box}
-        body{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;min-height:100vh;overflow-x:hidden;-webkit-tap-highlight-color:transparent}
+        body{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;min-height:100vh;overflow-x:hidden;-webkit-tap-highlight-color:transparent;user-select:none}
         .app{max-width:440px;margin:0 auto;min-height:100vh;position:relative;padding-bottom:90px}
         .page{display:none;padding:12px;animation:fadeIn 0.3s ease}.page.active{display:block}
         @keyframes fadeIn{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
@@ -618,13 +534,21 @@ HTML_TEMPLATE = r'''<!DOCTYPE html>
         .case-icon{font-size:48px;margin-bottom:8px;position:relative;z-index:1}.case-card.featured .case-icon{font-size:60px}
         .case-name{font-weight:700;font-size:14px;margin-bottom:4px;position:relative;z-index:1}.case-card.featured .case-name{font-size:17px}
         .case-price{font-size:12px;font-weight:600;position:relative;z-index:1}
+        .demo-toggle-inner{display:flex;align-items:center;justify-content:center;gap:10px;padding:10px 12px;margin:0 12px 12px;background:var(--card);border-radius:14px;border:1px solid var(--border)}
+        .demo-label-inner{font-size:13px;font-weight:600;color:var(--sub)}
+        .demo-switch-inner{position:relative;width:52px;height:28px;cursor:pointer}
+        .demo-switch-track-inner{position:absolute;top:0;left:0;width:100%;height:100%;border-radius:14px;background:#333;transition:all 0.3s}
+        .demo-switch-inner.active .demo-switch-track-inner{background:#10B981}
+        .demo-switch-thumb-inner{position:absolute;top:3px;left:3px;width:22px;height:22px;border-radius:50%;background:#fff;transition:all 0.3s;box-shadow:0 1px 3px rgba(0,0,0,0.3)}
+        .demo-switch-inner.active .demo-switch-thumb-inner{left:27px}
         .case-detail-header{text-align:center;padding:20px}.case-detail-icon{font-size:72px;margin-bottom:8px}.case-detail-name{font-weight:800;font-size:22px}.case-detail-price{font-size:15px;color:var(--gold);margin-top:4px}
         .items-preview{padding:0 12px 12px}.items-preview-title{font-weight:600;font-size:13px;color:var(--sub);margin-bottom:10px;text-transform:uppercase;letter-spacing:1px}
         .items-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
         .item-mini{display:flex;align-items:center;gap:10px;padding:10px 12px;background:var(--card);border-radius:12px;border:1px solid var(--border);font-size:12px}
-        .item-mini-icon{font-size:28px;width:36px;text-align:center}.item-mini-name{font-weight:600;font-size:11px}.item-mini-chance{font-size:10px;color:var(--gold)}
+        .item-mini-icon{font-size:36px;width:44px;text-align:center}.item-mini-name{font-weight:600;font-size:11px}.item-mini-chance{font-size:10px;color:var(--gold)}
         .spin-btn{display:block;width:calc(100% - 24px);margin:0 12px 12px;padding:16px;border-radius:16px;font-weight:700;font-size:16px;border:none;cursor:pointer;text-transform:uppercase;letter-spacing:1px;transition:all 0.3s}
         .spin-btn:active{transform:scale(0.97)}.spin-btn.active{background:linear-gradient(135deg,var(--accent),#a855f7);color:#fff;box-shadow:0 0 30px rgba(124,58,237,0.4)}.spin-btn.disabled{background:#333;color:#666;cursor:not-allowed}
+        .spin-btn.demo-btn{background:linear-gradient(135deg,#10B981,#34d399);color:#fff;box-shadow:0 0 20px rgba(16,185,129,0.3)}
         .spin-anim{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.95);z-index:200;flex-direction:column;align-items:center;justify-content:center}.spin-anim.active{display:flex}
         .roulette-window{width:92%;max-width:380px;height:110px;background:var(--card);border-radius:24px;overflow:hidden;position:relative;border:2px solid var(--border);margin-bottom:20px;box-shadow:0 20px 40px rgba(0,0,0,0.5)}
         .roulette-window::before,.roulette-window::after{content:'';position:absolute;left:0;width:100%;height:35px;z-index:2;pointer-events:none}
@@ -644,7 +568,7 @@ HTML_TEMPLATE = r'''<!DOCTYPE html>
         .tab-btn{flex:1;min-width:fit-content;padding:10px 8px;text-align:center;border-radius:10px;cursor:pointer;font-weight:600;font-size:11px;color:var(--sub);border:none;background:transparent;transition:all 0.3s;white-space:nowrap}.tab-btn.active{background:var(--accent);color:#fff}
         .tab-content{display:none;padding:12px}.tab-content.active{display:block}
         .gift-item-card{display:flex;align-items:center;gap:12px;padding:12px;background:var(--card);border-radius:12px;margin-bottom:8px;border:1px solid var(--border)}
-        .gift-item-icon{font-size:36px;width:50px;text-align:center}.gift-item-info{flex:1}.gift-item-name{font-weight:600;font-size:14px}.gift-item-value{font-size:11px;color:var(--gold)}.gift-item-status{font-size:10px;color:#10B981;margin-top:2px}
+        .gift-item-icon{font-size:44px;width:54px;text-align:center}.gift-item-info{flex:1}.gift-item-name{font-weight:600;font-size:14px}.gift-item-value{font-size:11px;color:var(--gold)}.gift-item-status{font-size:10px;color:#10B981;margin-top:2px}
         .gift-item-actions{display:flex;gap:6px}.btn-sm{padding:8px 12px;border-radius:8px;font-size:11px;font-weight:600;cursor:pointer;border:none;transition:all 0.3s}.btn-sm:active{transform:scale(0.95)}.btn-sell{background:#ef4444;color:#fff}.btn-withdraw{background:#3b82f6;color:#fff}
         .faq-item{padding:12px;background:var(--card);border-radius:12px;margin-bottom:8px;border:1px solid var(--border)}.faq-q{font-weight:600;margin-bottom:4px}.faq-a{font-size:13px;color:var(--sub)}
         .bottom-nav{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);display:flex;gap:4px;padding:6px;background:var(--card);border-radius:20px;z-index:100;border:1px solid var(--border);box-shadow:0 10px 30px rgba(0,0,0,0.3)}
@@ -655,157 +579,173 @@ HTML_TEMPLATE = r'''<!DOCTYPE html>
         .payment-code{font-size:18px;font-weight:700;background:rgba(255,215,0,0.1);padding:10px;border-radius:10px;margin:12px 0;word-break:break-all;color:var(--gold)}
         .payment-wallet{font-size:12px;color:var(--sub);word-break:break-all;margin-bottom:12px}
         .payment-btn{width:100%;padding:14px;border-radius:12px;font-weight:700;cursor:pointer;border:none;margin-top:8px;font-size:14px}
-        .payment-btn.check{background:var(--accent);color:#fff}.payment-btn.cancel{background:#333;color:#fff}
+        .payment-btn.check{background:var(--accent);color:#fff}.payment-btn.cancel{background:#333;color:#fff}.payment-btn.bot{background:#3b82f6;color:#fff}
+        .lang-btn{padding:14px;margin-bottom:8px;color:#fff;font-size:15px;border:none;border-radius:12px;cursor:pointer;font-weight:600;width:100%;transition:all 0.2s;background:var(--accent)}.lang-btn:active{transform:scale(0.96);opacity:0.8}.lang-btn.en{background:#3b82f6}
     </style>
 </head>
 <body>
 <div class="app">
-    <div class="topbar" id="topbarMain"><div class="topbar-title">🎁 Кейсы</div><div class="avatar-sm" id="avatarSm" onclick="navigate('profile')">S</div></div>
+    <div class="topbar" id="topbarMain"><div class="topbar-title" id="mainTitle">🎁 Кейсы</div><div class="avatar-sm" id="avatarSm">S</div></div>
     <div class="topbar" id="topbarCase" style="display:none"><button class="back-btn" onclick="goBack()">←</button><div class="topbar-title" id="caseTopTitle">Кейс</div><div style="width:36px"></div></div>
-    <div class="bal-row"><div class="bal-chip ton" id="tonChip">💎 100.00 TON</div><div class="bal-chip stars" id="starsChip">⭐ 1000 Stars</div></div>
-    <div class="deposit-row">
-        <button class="deposit-btn-top ton-btn" onclick="openDeposit('TON')">💎 Пополнить TON</button>
-        <button class="deposit-btn-top stars-btn" onclick="openDeposit('STARS')">⭐ Пополнить Stars</button>
+    <div class="bal-row"><div class="bal-chip ton" id="tonChip">💎 0.00 TON</div><div class="bal-chip stars" id="starsChip">⭐ 0 Stars</div></div>
+    <div class="deposit-row" id="depositRow">
+        <button class="deposit-btn-top ton-btn" onclick="openDeposit('TON')" id="btnDepTon">💎 Пополнить TON</button>
+        <button class="deposit-btn-top stars-btn" onclick="openDeposit('STARS')" id="btnDepStars">⭐ Пополнить Stars</button>
     </div>
 
     <div class="page active" id="page-cases"><div class="cases-grid" id="casesGrid"></div></div>
 
     <div class="page" id="page-case-detail">
         <div class="case-detail-header"><div class="case-detail-icon" id="detailIcon">📦</div><div class="case-detail-name" id="detailName">Обычный кейс</div><div class="case-detail-price" id="detailPrice">1 TON</div></div>
-        <div class="items-preview"><div class="items-preview-title">Возможные призы</div><div class="items-grid" id="detailItems"></div></div>
+        <div class="demo-toggle-inner"><span class="demo-label-inner" id="demoLabel">Демо-режим</span><div class="demo-switch-inner" id="demoSwitchInner" onclick="toggleDemoInner()"><div class="demo-switch-track-inner"></div><div class="demo-switch-thumb-inner"></div></div></div>
+        <div class="items-preview"><div class="items-preview-title" id="itemsTitle">Возможные призы</div><div class="items-grid" id="detailItems"></div></div>
         <button class="spin-btn active" id="detailSpinBtn" onclick="startSpin()">🎰 НАЧАТЬ КРУТИТЬ</button>
     </div>
 
     <div class="page" id="page-wins"><div id="winsList"></div></div>
     <div class="page" id="page-faq">
-        <div class="faq-item"><div class="faq-q">❓ Как пополнить Stars?</div><div class="faq-a">Нажмите "Пополнить Stars" — вам придёт счёт на оплату звёздами Telegram. Звёзды реально спишутся и зачислятся на баланс!</div></div>
-        <div class="faq-item"><div class="faq-q">❓ Как пополнить TON?</div><div class="faq-a">Нажмите "Пополнить TON", отправьте монеты с кодом на указанный кошелёк и нажмите "Проверить".</div></div>
+        <div class="faq-item"><div class="faq-q" id="faqQ1">❓ Как пополнить Stars?</div><div class="faq-a" id="faqA1">Нажмите кнопку «Пополнить Stars» вверху или в боте.</div></div>
+        <div class="faq-item"><div class="faq-q" id="faqQ2">❓ Что такое демо-режим?</div><div class="faq-a" id="faqA2">Демо-режим внутри кейса позволяет крутить бесплатно, но без сохранения выигрышей.</div></div>
     </div>
     <div class="page" id="page-lang">
-        <div style="text-align:center;padding:40px 20px"><div style="font-size:48px;margin-bottom:16px">🌐</div>
-            <button style="width:100%;padding:14px;margin-bottom:8px;background:var(--accent);color:#fff;font-size:15px;border:none;border-radius:12px;cursor:pointer;font-weight:600" onclick="setLang('ru')">🇷🇺 Русский</button>
-            <button style="width:100%;padding:14px;background:#3b82f6;color:#fff;font-size:15px;border:none;border-radius:12px;cursor:pointer;font-weight:600" onclick="setLang('en')">🇬🇧 English</button></div>
+        <div style="text-align:center;padding:40px 20px"><div style="font-size:48px;margin-bottom:16px">🌐</div><div style="font-weight:700;font-size:18px;margin-bottom:20px" id="langTitle">Выберите язык</div>
+            <button class="lang-btn" onclick="setLang('ru')">🇷🇺 Русский</button><button class="lang-btn en" onclick="setLang('en')">🇬🇧 English</button></div>
     </div>
     <div class="page" id="page-profile">
         <div class="profile-header"><div class="profile-avatar" id="profileAvatar">S</div><div style="font-weight:700;font-size:16px;margin-top:4px" id="profileName">Player</div></div>
         <div class="tab-row">
-            <button class="tab-btn active" onclick="profileTab('info')">📋 Инфо</button><button class="tab-btn" onclick="profileTab('wins')">🏆 Выигрыши</button><button class="tab-btn" onclick="profileTab('faq')">❓ FAQ</button><button class="tab-btn" onclick="profileTab('lang')">🌐 Язык</button>
+            <button class="tab-btn active" onclick="profileTab('info')" id="tabInfo">📋 Инфо</button><button class="tab-btn" onclick="profileTab('wins')" id="tabWins">🏆 Выигрыши</button><button class="tab-btn" onclick="profileTab('faq')" id="tabFaq">❓ FAQ</button><button class="tab-btn" onclick="profileTab('lang')" id="tabLang">🌐 Язык</button>
         </div>
         <div class="tab-content active" id="ptab-info">
             <div style="text-align:center;padding:10px">
-                <div style="margin:12px 0;font-size:15px">💎 TON: <b id="pTon" style="color:var(--gold)">100.00</b></div>
-                <div style="margin:12px 0;font-size:15px">⭐ Stars: <b id="pStars" style="color:#60a5fa">1000</b></div>
-                <div style="margin:12px 0;font-size:14px;color:var(--sub)">📥 TON: <b id="pDepTon">0</b></div>
-                <div style="margin:12px 0;font-size:14px;color:var(--sub)">📥 Stars: <b id="pDepStars">0</b></div>
-                <div style="margin:12px 0;font-size:14px;color:var(--sub)">🎁 Подарков: <b id="pGifts">0</b></div>
+                <div style="margin:12px 0;font-size:15px">💎 TON: <b id="pTon" style="color:var(--gold)">0.00</b></div>
+                <div style="margin:12px 0;font-size:15px">⭐ Stars: <b id="pStars" style="color:#60a5fa">0</b></div>
+                <div style="margin:12px 0;font-size:14px;color:var(--sub)" id="depTonLabel">📥 Пополнено TON: <b id="pDepTon">0</b></div>
+                <div style="margin:12px 0;font-size:14px;color:var(--sub)" id="depStarsLabel">📥 Пополнено Stars: <b id="pDepStars">0</b></div>
+                <div style="margin:12px 0;font-size:14px;color:var(--sub)" id="giftsLabel">🎁 Подарков: <b id="pGifts">0</b></div>
             </div>
         </div>
         <div class="tab-content" id="ptab-wins"><div id="profileWinsList"></div></div>
-        <div class="tab-content" id="ptab-faq"><div class="faq-item"><div class="faq-q">❓ Как продать?</div><div class="faq-a">В "Выигрыши" нажмите "Продать".</div></div></div>
-        <div class="tab-content" id="ptab-lang">
-            <button style="width:100%;padding:14px;margin-bottom:8px;background:var(--accent);color:#fff;font-size:15px;border:none;border-radius:12px;cursor:pointer;font-weight:600" onclick="setLang('ru')">🇷🇺 Русский</button>
-            <button style="width:100%;padding:14px;background:#3b82f6;color:#fff;font-size:15px;border:none;border-radius:12px;cursor:pointer;font-weight:600" onclick="setLang('en')">🇬🇧 English</button>
-        </div>
+        <div class="tab-content" id="ptab-faq"><div class="faq-item"><div class="faq-q">❓ Как продать?</div><div class="faq-a" id="faqSell">В «Выигрыши» нажмите «Продать».</div></div></div>
+        <div class="tab-content" id="ptab-lang"><button class="lang-btn" onclick="setLang('ru')">🇷🇺 Русский</button><button class="lang-btn en" onclick="setLang('en')">🇬🇧 English</button></div>
     </div>
 </div>
 
-<div class="spin-anim" id="spinAnim">
-    <div class="roulette-window" id="rouletteWindow"><div class="pointer-area"><div class="pointer-arrow-top">▼</div><div class="pointer-line"></div><div class="pointer-arrow-bottom">▼</div></div><div class="roulette-track" id="rouletteTrack"></div></div>
-    <div class="spin-text" id="spinText">Крутим...</div>
-</div>
-
-<div class="result-toast" id="resultToast" style="display:none" onclick="navigate('wins')"><div id="toastIcon" style="font-size:28px">🎁</div><div><div id="toastName" style="font-weight:700;font-size:14px">Подарок</div></div></div>
-
-<div class="payment-modal" id="paymentModal">
-    <div class="payment-card">
-        <button class="payment-close" onclick="closePayment()">✕</button>
-        <div style="font-size:40px;margin-bottom:8px" id="payIcon">💎</div>
-        <div style="font-weight:700;font-size:18px;margin-bottom:12px" id="payTitle">Пополнение</div>
-        <div id="payContent"></div>
-        <button class="payment-btn cancel" onclick="closePayment()">Закрыть</button>
-    </div>
-</div>
+<div class="spin-anim" id="spinAnim"><div class="roulette-window" id="rouletteWindow"><div class="pointer-area"><div class="pointer-arrow-top">▼</div><div class="pointer-line"></div><div class="pointer-arrow-bottom">▼</div></div><div class="roulette-track" id="rouletteTrack"></div></div><div class="spin-text" id="spinText">Крутим...</div></div>
+<div class="result-toast" id="resultToast" style="display:none"><div id="toastIcon" style="font-size:32px">🎁</div><div><div id="toastName" style="font-weight:700;font-size:14px">Подарок</div></div></div>
+<div class="payment-modal" id="paymentModal"><div class="payment-card"><button class="payment-close" onclick="closePayment()">✕</button><div style="font-size:40px;margin-bottom:8px" id="payIcon">💎</div><div style="font-weight:700;font-size:18px;margin-bottom:12px" id="payTitle">Пополнение</div><div id="payContent"></div><button class="payment-btn cancel" onclick="closePayment()">Закрыть</button></div></div>
 
 <div class="bottom-nav">
-    <button class="nav-btn active" onclick="navigate('cases')"><span>🎁</span><span class="nav-label">Кейсы</span></button>
-    <button class="nav-btn" onclick="navigate('wins')"><span>🏆</span><span class="nav-label">Выигрыши</span></button>
-    <button class="nav-btn" onclick="navigate('faq')"><span>❓</span><span class="nav-label">FAQ</span></button>
-    <button class="nav-btn" onclick="navigate('lang')"><span>🌐</span><span class="nav-label">Язык</span></button>
-    <button class="nav-btn" onclick="navigate('profile')"><span>👤</span><span class="nav-label">Профиль</span></button>
+    <button class="nav-btn active" id="navCases" onclick="navigate('cases')"><span>🎁</span><span class="nav-label" id="navLabelCases">Кейсы</span></button>
+    <button class="nav-btn" id="navWins" onclick="navigate('wins')"><span>🏆</span><span class="nav-label" id="navLabelWins">Выигрыши</span></button>
+    <button class="nav-btn" id="navFaq" onclick="navigate('faq')"><span>❓</span><span class="nav-label">FAQ</span></button>
+    <button class="nav-btn" id="navLang" onclick="navigate('lang')"><span>🌐</span><span class="nav-label" id="navLabelLang">Язык</span></button>
+    <button class="nav-btn" id="navProfile" onclick="navigate('profile')"><span>👤</span><span class="nav-label" id="navLabelProfile">Профиль</span></button>
 </div>
 
 <script>
 const tg=window.Telegram.WebApp;tg.expand();tg.ready();
 const user=tg.initDataUnsafe?.user||{};const uname=user.first_name||'Player';const uid=user.id||123456789;
-let ton=100,stars=1000,gifts=[],withdrawn=[],depTon=0,depStars=0,currentCase=null,isSpinning=false,currentPayId='';
+let ton=0,stars=0,gifts=[],withdrawn=[],depTon=0,depStars=0,currentCase=null,isSpinning=false,demoModeInner=false,lang='ru';
 document.getElementById('avatarSm').textContent=uname[0].toUpperCase();document.getElementById('profileAvatar').textContent=uname[0].toUpperCase();document.getElementById('profileName').textContent=uname;
 
-async function loadUser(){try{const r=await fetch('/api/user/'+uid);const d=await r.json();ton=d.balance_ton||100;stars=d.balance_stars||1000;gifts=d.gift_items||[];withdrawn=d.withdrawn_items||[];depTon=d.deposited_ton||0;depStars=d.deposited_stars||0;updateUI()}catch(e){updateUI()}}
-function updateUI(){document.getElementById('tonChip').textContent='💎 '+ton.toFixed(2)+' TON';document.getElementById('starsChip').textContent='⭐ '+stars+' Stars';document.getElementById('pTon').textContent=ton.toFixed(2);document.getElementById('pStars').textContent=stars;document.getElementById('pDepTon').textContent=depTon.toFixed(2)+' TON';document.getElementById('pDepStars').textContent=depStars+' Stars';document.getElementById('pGifts').textContent=gifts.length;renderWins();loadCases()}
+const TR={ru:{mainTitle:'🎁 Кейсы',depositTon:'💎 Пополнить TON',depositStars:'⭐ Пополнить Stars',demoLabel:'Демо-режим',itemsTitle:'Возможные призы',spin:'🎰 НАЧАТЬ КРУТИТЬ',spinDemo:'🆓 КРУТИТЬ ДЕМО',topUp:'💰 ПОПОЛНИТЕ БАЛАНС',noWins:'Нет выигрышей',sell:'💰 Продать',withdraw:'📤 Вывести',withdrawn:'✅ Выведено',history:'📤 История выводов',depTonL:'📥 Пополнено TON:',depStarsL:'📥 Пополнено Stars:',giftsL:'🎁 Подарков:',wins:'Выигрыши',profile:'Профиль',lang:'Язык',info:'📋 Инфо',faq:'❓ FAQ',chooseLang:'Выберите язык',spinning:'Крутим...',demSpinning:'Демо-режим...',faqQ1:'❓ Как пополнить Stars?',faqA1:'Нажмите кнопку «Пополнить Stars» вверху или в боте.',faqQ2:'❓ Что такое демо-режим?',faqA2:'Демо-режим внутри кейса позволяет крутить бесплатно.',faqSell:'В «Выигрыши» нажмите «Продать».',payTitleTon:'Пополнение TON',payTitleStars:'Пополнение Stars',sendTon:'Отправьте TON с кодом:',toWallet:'На кошелёк:',minTon:'⚠️ Мин: 1 TON | Без кода не зачислится!',goBot:'Перейдите в бота и нажмите',goBotBtn:'🤖 ПЕРЕЙТИ В БОТА',close:'Закрыть',cases:'Кейсы'},en:{mainTitle:'🎁 Cases',depositTon:'💎 Deposit TON',depositStars:'⭐ Deposit Stars',demoLabel:'Demo Mode',itemsTitle:'Possible Prizes',spin:'🎰 START SPIN',spinDemo:'🆓 SPIN DEMO',topUp:'💰 TOP UP',noWins:'No wins',sell:'💰 Sell',withdraw:'📤 Withdraw',withdrawn:'✅ Withdrawn',history:'📤 History',depTonL:'📥 Deposited TON:',depStarsL:'📥 Deposited Stars:',giftsL:'🎁 Gifts:',wins:'Wins',profile:'Profile',lang:'Language',info:'📋 Info',faq:'❓ FAQ',chooseLang:'Choose Language',spinning:'Spinning...',demSpinning:'Demo Mode...',faqQ1:'❓ How to deposit Stars?',faqA1:'Press «Deposit Stars» at the top or in the bot.',faqQ2:'❓ What is demo mode?',faqA2:'Demo mode allows free spins without saving wins.',faqSell:'In «Wins» press «Sell».',payTitleTon:'Deposit TON',payTitleStars:'Deposit Stars',sendTon:'Send TON with code:',toWallet:'To wallet:',minTon:'⚠️ Min: 1 TON | No code = no credit!',goBot:'Go to bot and press',goBotBtn:'🤖 GO TO BOT',close:'Close',cases:'Cases'}};
+function t(key){return TR[lang]?.[key]||TR['ru'][key]||key}
+
+async function loadUser(){try{const r=await fetch('/api/user/'+uid);const d=await r.json();ton=d.balance_ton||0;stars=d.balance_stars||0;gifts=d.gift_items||[];withdrawn=d.withdrawn_items||[];depTon=d.deposited_ton||0;depStars=d.deposited_stars||0;lang=d.language||'ru';updateUI()}catch(e){updateUI()}}
+
+function updateUI(){
+    document.getElementById('tonChip').textContent='💎 '+ton.toFixed(2)+' TON';
+    document.getElementById('starsChip').textContent='⭐ '+stars+' Stars';
+    document.getElementById('pTon').textContent=ton.toFixed(2);
+    document.getElementById('pStars').textContent=stars;
+    document.getElementById('pDepTon').textContent=depTon.toFixed(2)+' TON';
+    document.getElementById('pDepStars').textContent=depStars+' Stars';
+    document.getElementById('pGifts').textContent=gifts.length;
+    document.getElementById('depTonLabel').innerHTML=t('depTonL')+' <b id="pDepTon">'+depTon.toFixed(2)+' TON</b>';
+    document.getElementById('depStarsLabel').innerHTML=t('depStarsL')+' <b id="pDepStars">'+depStars+' Stars</b>';
+    document.getElementById('giftsLabel').innerHTML=t('giftsL')+' <b id="pGifts">'+gifts.length+'</b>';
+    document.getElementById('depositRow').style.display=demoModeInner?'none':'flex';
+    applyAllTranslations();
+    renderWins();loadCases();
+}
+
+function applyAllTranslations(){
+    document.getElementById('mainTitle').textContent=t('mainTitle');
+    document.getElementById('btnDepTon').textContent=t('depositTon');
+    document.getElementById('btnDepStars').textContent=t('depositStars');
+    document.getElementById('demoLabel').textContent=t('demoLabel');
+    document.getElementById('itemsTitle').textContent=t('itemsTitle');
+    document.getElementById('langTitle').textContent=t('chooseLang');
+    document.getElementById('faqQ1').textContent=t('faqQ1');document.getElementById('faqA1').textContent=t('faqA1');
+    document.getElementById('faqQ2').textContent=t('faqQ2');document.getElementById('faqA2').textContent=t('faqA2');
+    document.getElementById('faqSell').textContent=t('faqSell');
+    document.getElementById('tabInfo').textContent=t('info');document.getElementById('tabWins').textContent=t('wins');
+    document.getElementById('tabFaq').textContent=t('faq');document.getElementById('tabLang').textContent=t('lang');
+    document.getElementById('navLabelCases').textContent=t('cases');document.getElementById('navLabelWins').textContent=t('wins');
+    document.getElementById('navLabelLang').textContent=t('lang');document.getElementById('navLabelProfile').textContent=t('profile');
+    if(currentCase)updateCaseDetailButtons();
+}
+
+async function setLang(l){lang=l;try{await fetch('/api/language',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({user_id:uid,language:l})})}catch(e){}updateUI()}
+
+function toggleDemoInner(){demoModeInner=!demoModeInner;const sw=document.getElementById('demoSwitchInner');demoModeInner?sw.classList.add('active'):sw.classList.remove('active');updateUI();if(currentCase)updateCaseDetailButtons()}
+function updateCaseDetailButtons(){if(!currentCase)return;const can=demoModeInner||checkBalance();const btn=document.getElementById('detailSpinBtn');btn.className='spin-btn '+(can?'active':'disabled')+(demoModeInner?' demo-btn':'');btn.textContent=demoModeInner?t('spinDemo'):(can?t('spin'):t('topUp'));document.getElementById('detailPrice').textContent=demoModeInner?'🆓 '+t('demoLabel'):(currentCase.price_ton?currentCase.price_ton+' TON':(currentCase.price_stars?currentCase.price_stars+' Stars':'Бесплатно'))}
 
 async function loadCases(){try{const r=await fetch('/api/cases');const cases=await r.json();document.getElementById('casesGrid').innerHTML=cases.map(c=>{const price=c.price_ton?c.price_ton+' TON':(c.price_stars?c.price_stars+' Stars':'Бесплатно');const feat=c.id==='ton'?' featured':'';return `<div class="case-card${feat}" style="border-color:${c.color}" onclick="openCaseDetail('${c.id}')"><div class="case-icon">${c.icon}</div><div class="case-name">${c.name}</div><div class="case-price" style="color:${c.color}">${price}</div></div>`}).join('')}catch(e){}}
+
+function openCaseDetail(caseId){
+    fetch('/api/cases').then(r=>r.json()).then(cases=>{
+        currentCase=cases.find(c=>c.id===caseId);if(!currentCase)return;
+        document.getElementById('detailIcon').textContent=currentCase.icon;
+        document.getElementById('detailName').textContent=currentCase.name;
+        document.getElementById('caseTopTitle').textContent=currentCase.name;
+        document.getElementById('detailItems').innerHTML=currentCase.items.map(item=>`<div class="item-mini"><div class="item-mini-icon">${item.icon}</div><div><div class="item-mini-name">${item.name}</div><div class="item-mini-chance">${item.chance}%</div></div></div>`).join('');
+        demoModeInner=false;document.getElementById('demoSwitchInner').classList.remove('active');
+        updateUI();updateCaseDetailButtons();
+        showPage('case-detail');document.getElementById('topbarMain').style.display='none';document.getElementById('topbarCase').style.display='flex';
+    });
+}
 
 function openDeposit(type){
     const content=document.getElementById('payContent');
     document.getElementById('payIcon').textContent=type==='TON'?'💎':'⭐';
-    document.getElementById('payTitle').textContent=type==='TON'?'Пополнение TON':'Пополнение Stars';
-    
-    if(type==='TON'){
-        currentPayId=Math.random().toString(36).substring(2,18).toUpperCase();
-        content.innerHTML=`
-            <div style="font-size:13px;color:var(--sub);margin-bottom:8px">Отправьте TON с кодом в комментарии:</div>
-            <div class="payment-code">${currentPayId}</div>
-            <div style="font-size:13px;color:var(--sub);margin-bottom:4px">На кошелёк:</div>
-            <div class="payment-wallet">UQDRRRGutl_ccP25XcwbOK-RN2UXuvE1_GFoerlaIDvmwO7I</div>
-            <div style="font-size:11px;color:var(--accent);margin-bottom:12px">⚠️ Мин: 1 TON | Без кода не зачислится!</div>
-            <button class="payment-btn check" onclick="checkPayment()">✅ ПРОВЕРИТЬ ОПЛАТУ</button>
-        `;
-    } else {
-        content.innerHTML=`
-            <div style="font-size:14px;color:var(--sub);margin-bottom:12px">Для пополнения звёздами перейдите в бота и нажмите кнопку ⭐ <b>Пополнить Stars</b></div>
-            <div style="font-size:12px;color:var(--accent);margin-bottom:12px">Вам будет выставлен счёт на оплату звёздами Telegram</div>
-            <button class="payment-btn check" onclick="tg.openTelegramLink('https://t.me/nft_takes_gifts_bot')">🤖 ПЕРЕЙТИ В БОТА</button>
-        `;
-    }
+    document.getElementById('payTitle').textContent=type==='TON'?t('payTitleTon'):t('payTitleStars');
+    if(type==='TON'){const code=Math.random().toString(36).substring(2,18).toUpperCase();content.innerHTML=`<div style="font-size:13px;color:var(--sub);margin-bottom:8px">${t('sendTon')}</div><div class="payment-code">${code}</div><div style="font-size:13px;color:var(--sub);margin-bottom:4px">${t('toWallet')}</div><div class="payment-wallet">UQDRRRGutl_ccP25XcwbOK-RN2UXuvE1_GFoerlaIDvmwO7I</div><div style="font-size:11px;color:var(--accent);margin-bottom:12px">${t('minTon')}</div>`}
+    else{content.innerHTML=`<div style="font-size:14px;color:var(--sub);margin-bottom:12px">${t('goBot')} ⭐ <b>${t('depositStars')}</b></div><button class="payment-btn bot" onclick="tg.openTelegramLink('https://t.me/nft_takes_gifts_bot')">${t('goBotBtn')}</button>`}
     document.getElementById('paymentModal').classList.add('active');
 }
 function closePayment(){document.getElementById('paymentModal').classList.remove('active')}
-async function checkPayment(){
-    const r=await fetch('/api/check_payment',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({user_id:uid,payment_id:currentPayId})});
-    const d=await r.json();
-    if(d.success){ton+=d.amount;depTon+=d.amount;alert('✅ Зачислено: +'+d.amount.toFixed(4)+' TON!');closePayment();updateUI()}
-    else{alert('❌ Платёж не найден! Проверьте код и попробуйте снова.')}
-}
-
-function openCaseDetail(caseId){fetch('/api/cases').then(r=>r.json()).then(cases=>{currentCase=cases.find(c=>c.id===caseId);if(!currentCase)return;document.getElementById('detailIcon').textContent=currentCase.icon;document.getElementById('detailName').textContent=currentCase.name;const price=currentCase.price_ton?currentCase.price_ton+' TON':(currentCase.price_stars?currentCase.price_stars+' Stars':'Бесплатно');document.getElementById('detailPrice').textContent=price;document.getElementById('caseTopTitle').textContent=currentCase.name;document.getElementById('detailItems').innerHTML=currentCase.items.map(item=>`<div class="item-mini"><div class="item-mini-icon">${item.icon}</div><div><div class="item-mini-name">${item.name}</div><div class="item-mini-chance">${item.chance}%</div></div></div>`).join('');const can=checkBalance();const btn=document.getElementById('detailSpinBtn');btn.className=can?'spin-btn active':'spin-btn disabled';btn.textContent=can?'🎰 НАЧАТЬ КРУТИТЬ':'💰 ПОПОЛНИТЕ БАЛАНС';showPage('case-detail');document.getElementById('topbarMain').style.display='none';document.getElementById('topbarCase').style.display='flex'})}
 function checkBalance(){if(!currentCase)return false;if(currentCase.id==='free')return true;if(currentCase.price_ton&&ton>=currentCase.price_ton)return true;if(currentCase.price_stars&&stars>=currentCase.price_stars)return true;return false}
 
 async function startSpin(){
-    if(!currentCase||isSpinning)return;if(!checkBalance()){alert('Пополните баланс!');return}
+    if(!currentCase||isSpinning)return;if(!demoModeInner&&!checkBalance()){alert(t('topUp'));return}
     const currency=currentCase.price_ton?'TON':'STARS';
-    const r=await fetch('/api/open_case',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({user_id:uid,case_id:currentCase.id,currency})});
+    const r=await fetch('/api/open_case',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({user_id:uid,case_id:currentCase.id,currency,demo_mode:demoModeInner})});
     const d=await r.json();if(d.error){alert(d.error);return}
     ton=d.balance_ton;stars=d.balance_stars;const winner=d.winner;
     const trackItems=[];for(let i=0;i<40;i++)trackItems.push(...currentCase.items);
-    const winnerIndices=[];trackItems.forEach((item,i)=>{if(item.icon===winner.icon&&item.name===winner.name)winnerIndices.push(i)});
+    const wis=[];trackItems.forEach((item,i)=>{if(item.icon===winner.icon&&item.name===winner.name)wis.push(i)});
     const rs=Math.floor(trackItems.length*0.55),re=Math.floor(trackItems.length*0.75);
-    const valid=winnerIndices.filter(i=>i>=rs&&i<=re);const chosenIdx=valid.length>0?valid[Math.floor(Math.random()*valid.length)]:winnerIndices[Math.floor(winnerIndices.length/2)];
+    const valid=wis.filter(i=>i>=rs&&i<=re);const ci=valid.length>0?valid[Math.floor(Math.random()*valid.length)]:wis[Math.floor(wis.length/2)];
     const track=document.getElementById('rouletteTrack');track.innerHTML=trackItems.map((item,i)=>`<div class="roulette-item" id="ri${i}">${item.icon}</div>`).join('');
-    const IW=88;const ww=document.getElementById('rouletteWindow').offsetWidth;const tp=-(chosenIdx*IW)+(ww/2)-(IW/2);
-    track.style.transition='none';track.style.transform='translateX(0)';document.getElementById('spinAnim').classList.add('active');document.getElementById('spinText').textContent='Крутим...';document.getElementById('spinText').classList.remove('win');isSpinning=true;
+    const IW=88,ww=document.getElementById('rouletteWindow').offsetWidth,tp=-(ci*IW)+(ww/2)-(IW/2);
+    track.style.transition='none';track.style.transform='translateX(0)';
+    document.getElementById('spinAnim').classList.add('active');
+    document.getElementById('spinText').textContent=demoModeInner?t('demSpinning'):t('spinning');
+    document.getElementById('spinText').classList.remove('win');isSpinning=true;
     requestAnimationFrame(()=>{requestAnimationFrame(()=>{track.style.transition='transform 6s cubic-bezier(0.05,0.95,0.1,1)';track.style.transform=`translateX(${tp}px)`})});
-    setTimeout(()=>{document.querySelectorAll('.roulette-item').forEach(el=>el.classList.remove('highlight'));const wel=document.getElementById('ri'+chosenIdx);if(wel)wel.classList.add('highlight');document.getElementById('spinText').textContent='🎉 '+winner.name+'!';document.getElementById('spinText').classList.add('win')},5500);
-    setTimeout(()=>{document.getElementById('spinAnim').classList.remove('active');isSpinning=false;gifts.push({name:winner.name,icon:winner.icon,value_stars:winner.value_stars||0,value_ton:winner.value_ton||0});document.getElementById('toastIcon').textContent=winner.icon;document.getElementById('toastName').textContent=winner.name;document.getElementById('resultToast').style.display='flex';setTimeout(()=>document.getElementById('resultToast').style.display='none',3000);updateUI();goBack()},6300);
+    setTimeout(()=>{document.querySelectorAll('.roulette-item').forEach(el=>el.classList.remove('highlight'));const wel=document.getElementById('ri'+ci);if(wel)wel.classList.add('highlight');document.getElementById('spinText').textContent=(demoModeInner?'[DEMO] ':'')+'🎉 '+winner.name+'!';document.getElementById('spinText').classList.add('win')},5500);
+    setTimeout(()=>{document.getElementById('spinAnim').classList.remove('active');isSpinning=false;if(!demoModeInner){gifts.push({name:winner.name,icon:winner.icon,value_stars:winner.value_stars||0,value_ton:winner.value_ton||0})}document.getElementById('toastIcon').textContent=winner.icon;document.getElementById('toastName').textContent=(demoModeInner?'[DEMO] ':'')+winner.name;document.getElementById('resultToast').style.display='flex';setTimeout(()=>document.getElementById('resultToast').style.display='none',3000);updateUI();goBack()},6300);
 }
 
-function goBack(){showPage('cases');document.getElementById('topbarMain').style.display='flex';document.getElementById('topbarCase').style.display='none';currentCase=null}
-function renderWins(){const active=gifts.map((g,i)=>`<div class="gift-item-card"><div class="gift-item-icon">${g.icon}</div><div class="gift-item-info"><div class="gift-item-name">${g.name}</div><div class="gift-item-value">${g.value_stars?g.value_stars+' Stars':''} ${g.value_ton?g.value_ton+' TON':''}</div></div><div class="gift-item-actions"><button class="btn-sm btn-sell" onclick="sellItem(${i})">💰 Продать</button><button class="btn-sm btn-withdraw" onclick="withdrawItem(${i})">📤 Вывести</button></div></div>`).join('');const done=withdrawn.map(g=>`<div class="gift-item-card"><div class="gift-item-icon">${g.icon}</div><div class="gift-item-info"><div class="gift-item-name">${g.name}</div><div class="gift-item-status">✅ Выведено • ${(g.wallet||'').slice(0,8)}...</div></div></div>`).join('');const html=(active||'')+(done?('<div style="font-weight:600;font-size:13px;color:var(--sub);margin:12px 0 8px">📤 История выводов</div>'+done):'')||'<div style="text-align:center;padding:20px;color:#888">Нет выигрышей</div>';document.getElementById('winsList').innerHTML=html;document.getElementById('profileWinsList').innerHTML=html}
+function goBack(){showPage('cases');document.getElementById('topbarMain').style.display='flex';document.getElementById('topbarCase').style.display='none';currentCase=null;demoModeInner=false;document.getElementById('demoSwitchInner').classList.remove('active');updateUI()}
+function renderWins(){const active=gifts.map((g,i)=>`<div class="gift-item-card"><div class="gift-item-icon">${g.icon}</div><div class="gift-item-info"><div class="gift-item-name">${g.name}</div><div class="gift-item-value">${g.value_stars?g.value_stars+' Stars':''} ${g.value_ton?g.value_ton+' TON':''}</div></div><div class="gift-item-actions"><button class="btn-sm btn-sell" onclick="sellItem(${i})">${t('sell')}</button><button class="btn-sm btn-withdraw" onclick="withdrawItem(${i})">${t('withdraw')}</button></div></div>`).join('');const done=withdrawn.map(g=>`<div class="gift-item-card"><div class="gift-item-icon">${g.icon}</div><div class="gift-item-info"><div class="gift-item-name">${g.name}</div><div class="gift-item-status">${t('withdrawn')} • ${(g.wallet||'').slice(0,8)}...</div></div></div>`).join('');const html=(active||'')+(done?('<div style="font-weight:600;font-size:13px;color:var(--sub);margin:12px 0 8px">'+t('history')+'</div>'+done):'')||('<div style="text-align:center;padding:20px;color:#888">'+t('noWins')+'</div>');document.getElementById('winsList').innerHTML=html;document.getElementById('profileWinsList').innerHTML=html}
 async function sellItem(i){const r=await fetch('/api/sell_item',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({user_id:uid,item_index:i})});const d=await r.json();if(d.success){ton=d.balance_ton;stars=d.balance_stars;gifts=gifts.filter((_,idx)=>idx!==i);updateUI()}}
-async function withdrawItem(i){const w=prompt('Введите адрес кошелька TON для вывода:');if(!w)return;const r=await fetch('/api/withdraw_item',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({user_id:uid,item_index:i,wallet:w})});const d=await r.json();if(d.success){gifts=gifts.filter((_,idx)=>idx!==i);withdrawn.push(d.item);updateUI();alert(d.message)}}
+async function withdrawItem(i){const w=prompt('TON wallet:');if(!w)return;const r=await fetch('/api/withdraw_item',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({user_id:uid,item_index:i,wallet:w})});const d=await r.json();if(d.success){gifts=gifts.filter((_,idx)=>idx!==i);withdrawn.push(d.item);updateUI();alert(d.message)}}
 function showPage(p){document.querySelectorAll('.page').forEach(pg=>pg.classList.remove('active'));const el=document.getElementById('page-'+p);if(el)el.classList.add('active')}
-function navigate(p){if(isSpinning)return;showPage(p);document.getElementById('topbarMain').style.display='flex';document.getElementById('topbarCase').style.display='none';currentCase=null;document.querySelectorAll('.nav-btn').forEach(b=>b.classList.remove('active'));if(event&&event.target){const btn=event.target.closest('.nav-btn');if(btn)btn.classList.add('active')}}
-function profileTab(t){document.querySelectorAll('#page-profile .tab-btn').forEach(b=>b.classList.remove('active'));document.querySelectorAll('#page-profile .tab-content').forEach(c=>c.classList.remove('active'));if(event&&event.target)event.target.classList.add('active');const el=document.getElementById('ptab-'+t);if(el)el.classList.add('active')}
-async function setLang(l){await fetch('/api/language',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({user_id:uid,language:l})});alert(l==='ru'?'Русский':'English')}
+function navigate(p){if(isSpinning)return;showPage(p);document.getElementById('topbarMain').style.display='flex';document.getElementById('topbarCase').style.display='none';currentCase=null;demoModeInner=false;document.getElementById('demoSwitchInner').classList.remove('active');updateUI();document.querySelectorAll('.nav-btn').forEach(b=>b.classList.remove('active'));const navMap={cases:'navCases',wins:'navWins',faq:'navFaq',lang:'navLang',profile:'navProfile'};const an=document.getElementById(navMap[p]);if(an)an.classList.add('active');document.getElementById('mainTitle').textContent=t(p==='cases'?'mainTitle':p==='wins'?'wins':p==='faq'?'faq':p==='lang'?'chooseLang':'profile')}
+function profileTab(t){document.querySelectorAll('#page-profile .tab-btn').forEach(b=>b.classList.remove('active'));document.querySelectorAll('#page-profile .tab-content').forEach(c=>c.classList.remove('active'));event.target.classList.add('active');const el=document.getElementById('ptab-'+t);if(el)el.classList.add('active')}
 loadUser();
 </script>
 </body>

@@ -24,7 +24,7 @@ TONCENTER_API_KEY = "12237ee2c684a00cd473582230a4d9efea8b51b6baf2322883e4ef52f5d
 TONCENTER_URL = "https://toncenter.com/api/v2"
 
 RENDER_URL = os.environ.get('RENDER_EXTERNAL_HOSTNAME', 'syndrome-bot-9.onrender.com')
-WEBAPP_URL = "https://syndrome-bot-17.onrender.com"
+WEBAPP_URL = "https://syndrome-bot-18.onrender.com"
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 BOT_USERNAME = "nft_takes_gifts_bot"
 
@@ -146,15 +146,6 @@ def generate_payment_id(user_id):
 # =================================================================
 # ДАННЫЕ КЕЙСОВ
 # =================================================================
-GIFT_ICONS = {
-    "🧸 Мишка": "🧸", "❤️ Сердечко": "❤️", "🌹 Роза": "🌹", "🎂 Тортик": "🎂",
-    "💍 Кольцо": "💍", "💎 Кристалл": "💎", "15 Звёзд": "⭐", "30 Звёзд": "🌟",
-    "50 Звёзд": "💫", "75 Звёзд": "✨", "150 Звёзд": "💎", "350 Звёзд": "👑",
-    "1 TON": "💎", "3 TON": "💎", "5 TON": "💎", "8 TON": "💎",
-    "15 TON": "💎", "30 TON": "💎", "🐵 NFT Обезьяна": "🐵", "🐍 NFT Змейка": "🐍",
-    "🎄 NFT Новый Год": "🎄", "🎃 NFT Хэллоуин": "🎃", "💩 Ничего": "💩",
-}
-
 ALL_CASES = {
     "regular": {
         "id": "regular", "name": "Обычный кейс", "icon": "📦",
@@ -270,31 +261,71 @@ def handle_dep_ton(cb, chat_id, msg_id, uid):
     tg_edit(chat_id, msg_id, f"💎 <b>ПОПОЛНЕНИЕ TON</b>\n\n📤 Кошелёк:\n<code>{TON_WALLET}</code>\n\n📝 Код:\n<code>{pid}</code>\n\n⚠️ Мин: <b>1 TON</b>\n⚠️ Укажите код в комментарии!", keyboard)
 
 def handle_dep_stars(cb, chat_id, msg_id, uid):
+    """Пополнение звёздами — инструкция по отправке"""
     tg_answer(cb["id"])
     
-    invoice_data = {
-        "chat_id": uid,
-        "title": "Пополнение баланса",
-        "description": "Пополнение игрового баланса звёздами Telegram",
-        "payload": f"stars_deposit_{uid}",
-        "provider_token": "",
-        "currency": "XTR",
-        "prices": [
-            {"label": "50 Stars", "amount": 50},
-            {"label": "100 Stars", "amount": 100},
-            {"label": "250 Stars", "amount": 250},
-            {"label": "500 Stars", "amount": 500},
-            {"label": "1000 Stars", "amount": 1000}
+    keyboard = {
+        "inline_keyboard": [
+            [{"text": "⭐ 50 Stars", "callback_data": f"pay_stars_50"}],
+            [{"text": "⭐ 100 Stars", "callback_data": f"pay_stars_100"}],
+            [{"text": "⭐ 250 Stars", "callback_data": f"pay_stars_250"}],
+            [{"text": "⭐ 500 Stars", "callback_data": f"pay_stars_500"}],
+            [{"text": "💎 ПОПОЛНИТЬ TON", "callback_data": "dep_ton"}],
+            [{"text": "🏠 МЕНЮ", "callback_data": "menu"}]
         ]
     }
     
-    r = requests.post(f"{TELEGRAM_API}/sendInvoice", json=invoice_data, timeout=10)
-    result = r.json()
+    tg_edit(chat_id, msg_id,
+        "⭐ <b>ПОПОЛНЕНИЕ STARS</b>\n\n"
+        "Выберите сумму для пополнения:\n\n"
+        "💰 <b>Как это работает:</b>\n"
+        "1. Нажмите на сумму ниже\n"
+        "2. Отправьте звёзды боту через профиль\n"
+        "3. Нажмите кнопку подтверждения\n"
+        "4. Звёзды зачислятся на баланс!\n\n"
+        "📱 <b>Как отправить звёзды:</b>\n"
+        "• Откройте профиль бота\n"
+        "• Нажмите на баланс звёзд\n"
+        "• Выберите «Отправить звёзды»",
+        keyboard
+    )
+
+def handle_pay_stars(cb, chat_id, msg_id, uid, amount):
+    """Подтверждение отправки звёзд"""
+    tg_answer(cb["id"])
     
-    if result.get('ok'):
-        tg_edit(chat_id, msg_id, "⭐ <b>ПОПОЛНЕНИЕ STARS</b>\n\n📱 Вам отправлен счёт на оплату звёздами.\n💳 <b>Оплатите его в чате с ботом!</b>\n\n✅ Звёзды реально спишутся\n✅ Баланс пополнится автоматически", {"inline_keyboard": [[{"text": "🔄 ПОПРОБОВАТЬ СНОВА", "callback_data": "dep_stars"}], [{"text": "🏠 МЕНЮ", "callback_data": "menu"}]]})
-    else:
-        tg_edit(chat_id, msg_id, "❌ <b>Ошибка создания счёта</b>\n\nПопробуйте позже.", {"inline_keyboard": [[{"text": "💎 ПОПОЛНИТЬ TON", "callback_data": "dep_ton"}], [{"text": "🏠 МЕНЮ", "callback_data": "menu"}]]})
+    keyboard = {"inline_keyboard": [
+        [{"text": f"✅ Я ОТПРАВИЛ {amount} STARS", "callback_data": f"confirm_stars_{amount}"}],
+        [{"text": "🔄 ВЫБРАТЬ ДРУГУЮ СУММУ", "callback_data": "dep_stars"}],
+        [{"text": "🏠 МЕНЮ", "callback_data": "menu"}]
+    ]}
+    
+    tg_edit(chat_id, msg_id,
+        f"⭐ <b>ОТПРАВКА {amount} STARS</b>\n\n"
+        f"Для пополнения баланса:\n\n"
+        f"1. Откройте профиль бота @{BOT_USERNAME}\n"
+        f"2. Нажмите на баланс звёзд ⭐\n"
+        f"3. Выберите «Отправить звёзды»\n"
+        f"4. Введите сумму: <b>{amount}</b>\n"
+        f"5. Подтвердите отправку\n\n"
+        f"После отправки нажмите кнопку ниже 👇",
+        keyboard
+    )
+
+def handle_confirm_stars(cb, chat_id, msg_id, uid, amount):
+    """Зачисление звёзд после отправки"""
+    tg_answer(cb["id"], "✅ Зачисляю звёзды...")
+    
+    with db_connect() as conn:
+        conn.execute('UPDATE users SET balance_stars=balance_stars+?, total_deposited_stars=total_deposited_stars+? WHERE user_id=?', (amount, amount, uid))
+        conn.execute('INSERT INTO transactions (user_id, type, amount, currency, tx_hash) VALUES (?,?,?,?,?)', (uid, 'deposit_stars', amount, 'STARS', f'manual_{int(time.time())}'))
+        conn.execute('INSERT INTO stars_payments (user_id, stars_amount, charge_id, status) VALUES (?,?,?,?)', (uid, amount, f'manual_{int(time.time())}', 'completed'))
+    
+    tg_edit(chat_id, msg_id,
+        f"✅ <b>ЗАЧИСЛЕНО!</b>\n\n⭐ +{amount} Stars\n\n🎁 Открывайте кейсы!",
+        {"inline_keyboard": [[{"text": "🎁 ОТКРЫТЬ ПРИЛОЖЕНИЕ", "web_app": {"url": WEBAPP_URL}}]]}
+    )
+    tg_send(ADMIN_ID, f"⭐ +{amount} Stars от {uid} (отправлены боту)")
 
 def handle_check_payment(cb, chat_id, msg_id, uid, pid):
     tg_answer(cb["id"], "🔍 Проверяю блокчейн...")
@@ -483,6 +514,12 @@ def webhook():
             
             if data == "dep_ton": handle_dep_ton(cb, chat_id, msg_id, uid)
             elif data == "dep_stars": handle_dep_stars(cb, chat_id, msg_id, uid)
+            elif data.startswith("pay_stars_"):
+                amount = int(data.replace("pay_stars_", ""))
+                handle_pay_stars(cb, chat_id, msg_id, uid, amount)
+            elif data.startswith("confirm_stars_"):
+                amount = int(data.replace("confirm_stars_", ""))
+                handle_confirm_stars(cb, chat_id, msg_id, uid, amount)
             elif data == "profile": handle_profile(cb, chat_id, msg_id, uid, fname)
             elif data == "ref_info": handle_ref_info(cb, chat_id, msg_id, uid)
             elif data == "menu": tg_edit(chat_id, msg_id, "🎁 <b>GIFT CASES</b>", {"inline_keyboard": [[{"text": "🎁 ОТКРЫТЬ ПРИЛОЖЕНИЕ", "web_app": {"url": WEBAPP_URL}}]]}); tg_answer(cb["id"])

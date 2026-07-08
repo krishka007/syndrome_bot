@@ -88,6 +88,12 @@ def init_db():
                 status TEXT DEFAULT 'pending',
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
+            CREATE TABLE IF NOT EXISTS referrals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                referrer_id INTEGER,
+                referred_id INTEGER,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
         ''')
     logger.info("✅ DB ready")
 
@@ -118,7 +124,7 @@ def verify_ton_transaction(wallet_address, comment, hours=24):
         return None
 
 # =================================================================
-# TELEGRAM STARS PAYMENT (РЕАЛЬНАЯ ОПЛАТА)
+# TELEGRAM STARS PAYMENT
 # =================================================================
 def create_stars_invoice(user_id, stars_amount):
     try:
@@ -167,7 +173,7 @@ def generate_payment_id(user_id):
     return hashlib.sha256(f"pay{user_id}{time.time()}{random.randint(0,9999)}".encode()).hexdigest()[:16].upper()
 
 # =================================================================
-# ДАННЫЕ КЕЙСОВ С ДВОЙНЫМИ ШАНСАМИ
+# ДАННЫЕ КЕЙСОВ
 # =================================================================
 CASES_DATA = {
     "regular": {
@@ -267,24 +273,31 @@ def handle_start(chat_id, user, args=None):
     ref_code = args[0] if args else None
     
     with db_connect() as conn:
-        row = conn.execute('SELECT user_id FROM users WHERE user_id=?', (uid,)).fetchone()
+        row = conn.execute('SELECT user_id, referral_code FROM users WHERE user_id=?', (uid,)).fetchone()
         
         if not row:
             my_ref = generate_ref_code(uid)
             referred_by = None
+            
+            # Обработка реферального кода
             if ref_code:
+                # Ищем кто владелец этого кода
                 ref_row = conn.execute('SELECT user_id FROM users WHERE referral_code=?', (ref_code,)).fetchone()
                 if ref_row and ref_row[0] != uid:
                     referred_by = ref_row[0]
-                    conn.execute('UPDATE users SET referral_count=referral_count+1 WHERE user_id=?', (referred_by,))
-                    ref_count = conn.execute('SELECT referral_count FROM users WHERE user_id=?', (referred_by,)).fetchone()
+                    # Увеличиваем счётчик рефералов у пригласившего
+                    conn.execute('UPDATE users SET referral_count = referral_count + 1 WHERE user_id = ?', (referred_by,))
+                    # Сохраняем запись о реферале
+                    conn.execute('INSERT INTO referrals (referrer_id, referred_id) VALUES (?, ?)', (referred_by, uid))
+                    # Проверяем не набрал ли 3 реферала
+                    ref_count = conn.execute('SELECT referral_count FROM users WHERE user_id = ?', (referred_by,)).fetchone()
                     if ref_count and ref_count[0] >= 3:
-                        conn.execute('UPDATE users SET free_case_available=1 WHERE user_id=?', (referred_by,))
+                        conn.execute('UPDATE users SET free_case_available = 1 WHERE user_id = ?', (referred_by,))
+                        logger.info(f"🎁 Пользователь {referred_by} получил бесплатный кейс! Рефералов: {ref_count[0]}")
             
-            conn.execute('INSERT INTO users (user_id, username, first_name, referral_code, referred_by, balance_stars, balance_ton) VALUES (?, ?, ?, ?, ?, 0, 0)', (uid, uname, fname, my_ref, referred_by))
-            logger.info(f"🆕 НОВЫЙ ПОЛЬЗОВАТЕЛЬ через /start! ID: {uid}, @{uname}")
-            try: tg_send(ADMIN_ID, f"🆕 <b>НОВЫЙ ПОЛЬЗОВАТЕЛЬ!</b>\n\n👤 ID: <code>{uid}</code>\n📛 Имя: {fname}\n🔗 @{uname}\n📱 Зашёл через /start")
-            except: pass
+            conn.execute('INSERT INTO users (user_id, username, first_name, referral_code, referred_by, balance_stars, balance_ton) VALUES (?, ?, ?, ?, ?, 0, 0)', 
+                        (uid, uname, fname, my_ref, referred_by))
+            logger.info(f"🆕 Новый пользователь: {uid}, пригласил: {referred_by}")
     
     keyboard = {"inline_keyboard": [
         [{"text": "🎁 ОТКРЫТЬ ПРИЛОЖЕНИЕ", "web_app": {"url": WEBAPP_URL}}],
@@ -301,7 +314,6 @@ def handle_dep_ton(cb, chat_id, msg_id, uid):
     pid = generate_payment_id(uid)
     with db_connect() as conn:
         conn.execute('UPDATE users SET pending_payment_id=?, pending_payment_time=CURRENT_TIMESTAMP WHERE user_id=?', (pid, uid))
-    logger.info(f"💰 Пользователь {uid} запросил пополнение TON. Код: {pid}")
     
     keyboard = {"inline_keyboard": [
         [{"text": "✅ ПРОВЕРИТЬ ОПЛАТУ", "callback_data": f"check_{pid}"}],
@@ -313,7 +325,6 @@ def handle_dep_ton(cb, chat_id, msg_id, uid):
 
 def handle_dep_stars(cb, chat_id, msg_id, uid):
     tg_answer(cb["id"])
-    logger.info(f"⭐ Пользователь {uid} запросил пополнение Stars")
     
     keyboard = {
         "inline_keyboard": [
@@ -339,7 +350,6 @@ def handle_dep_stars(cb, chat_id, msg_id, uid):
 
 def handle_stars_invoice(cb, chat_id, msg_id, uid, amount):
     tg_answer(cb["id"], f"🔄 Создаю счёт на {amount} Stars...")
-    logger.info(f"⭐ Пользователь {uid} создаёт счёт на {amount} Stars")
     
     charge_id = f"stars_{uid}_{int(time.time())}"
     with db_connect() as conn:
@@ -364,7 +374,6 @@ def handle_stars_invoice(cb, chat_id, msg_id, uid, amount):
         )
     else:
         error_msg = result.get('description', 'Неизвестная ошибка') if isinstance(result, dict) else str(result)
-        logger.error(f"❌ Ошибка создания счёта Stars для {uid}: {error_msg}")
         with db_connect() as conn:
             conn.execute('DELETE FROM stars_payments WHERE charge_id=?', (charge_id,))
             conn.execute('UPDATE users SET pending_stars_amount=NULL, pending_stars_charge_id=NULL WHERE user_id=?', (uid,))
@@ -399,10 +408,7 @@ def handle_check_payment(cb, chat_id, msg_id, uid, pid):
         amt = result['amount']
         with db_connect() as conn:
             conn.execute('UPDATE users SET balance_ton=balance_ton+?, total_deposited_ton=total_deposited_ton+?, pending_payment_id=NULL WHERE user_id=?', (amt, amt, uid))
-        logger.info(f"💰 Пользователь {uid} пополнил TON: +{amt:.4f} TON")
         tg_edit(chat_id, msg_id, f"✅ <b>ЗАЧИСЛЕНО!</b>\n\n💰 +{amt:.4f} TON\n\n🎁 Открывайте кейсы!", {"inline_keyboard": [[{"text": "🎁 ОТКРЫТЬ ПРИЛОЖЕНИЕ", "web_app": {"url": WEBAPP_URL}}]]})
-        try: tg_send(ADMIN_ID, f"💰 <b>ПОПОЛНЕНИЕ TON!</b>\n\n👤 ID: <code>{uid}</code>\n💎 Сумма: {amt:.4f} TON\n🔗 Хеш: {result['hash'][:20]}...")
-        except: pass
     else:
         tg_edit(chat_id, msg_id, "❌ <b>ПЛАТЕЖ НЕ НАЙДЕН</b>\n\n• Проверьте код\n• Мин: 1 TON", {"inline_keyboard": [[{"text": "🔄 ПРОВЕРИТЬ СНОВА", "callback_data": f"check_{pid}"}], [{"text": "💎 НОВЫЙ КОД", "callback_data": "dep_ton"}]]})
 
@@ -440,7 +446,6 @@ def api_user(uid):
             row = conn.execute('SELECT balance_ton, balance_stars, gift_items, withdrawn_items, referral_count, free_case_available, language, total_deposited_ton, total_deposited_stars FROM users WHERE user_id=?', (uid,)).fetchone()
         
         if row:
-            logger.info(f"👤 Пользователь {uid} зашёл в приложение. Баланс: {row[0]:.2f} TON, {row[1]} Stars")
             return jsonify({
                 'balance_ton': row[0], 'balance_stars': row[1],
                 'gift_items': json.loads(row[2]) if row[2] else [],
@@ -449,15 +454,11 @@ def api_user(uid):
                 'language': row[6], 'deposited_ton': row[7], 'deposited_stars': row[8]
             })
         else:
-            # АВТО-РЕГИСТРАЦИЯ НОВОГО ПОЛЬЗОВАТЕЛЯ
+            # Авто-регистрация
             ref_code = generate_ref_code(uid)
             conn.execute('INSERT INTO users (user_id, username, first_name, referral_code, balance_stars, balance_ton) VALUES (?, ?, ?, ?, 0, 0)', 
                         (uid, f"user_{uid}", "Player", ref_code))
             conn.commit()
-            
-            logger.info(f"🆕 НОВЫЙ ПОЛЬЗОВАТЕЛЬ через WebApp! ID: {uid}, Реф. код: {ref_code}")
-            try: tg_send(ADMIN_ID, f"🆕 <b>НОВЫЙ ПОЛЬЗОВАТЕЛЬ!</b>\n\n👤 ID: <code>{uid}</code>\n📱 Зашёл через приложение\n🔗 Реф. код: <code>{ref_code}</code>")
-            except: pass
             
             return jsonify({
                 'balance_ton': 0, 'balance_stars': 0,
@@ -466,7 +467,7 @@ def api_user(uid):
                 'language': 'ru', 'deposited_ton': 0, 'deposited_stars': 0
             })
     except Exception as e:
-        logger.error(f"❌ Ошибка загрузки пользователя {uid}: {e}")
+        logger.error(f"User load error: {e}")
     
     return jsonify({
         'balance_ton': 0, 'balance_stars': 0,
@@ -487,8 +488,6 @@ def api_open_case():
     case_id = data.get('case_id')
     currency = data.get('currency', 'STARS')
     is_demo = data.get('demo_mode', False)
-    
-    logger.info(f"🎰 Пользователь {uid} открывает кейс {case_id} (Демо: {is_demo}, Валюта: {currency})")
     
     if case_id not in CASES_DATA: return jsonify({'error': 'Кейс не найден!'}), 404
     case = CASES_DATA[case_id]
@@ -525,16 +524,9 @@ def api_open_case():
         winner = random.choice(pool) if pool else case['items'][-1]
         winner_name = winner.get(f'name_{user_lang}', winner.get('name_ru', ''))
         
-        logger.info(f"🎉 Пользователь {uid} выиграл: {winner_name} (Демо: {is_demo})")
-        
         if not is_demo:
             gifts.append({'name': winner_name, 'icon': winner['icon'], 'value_stars': winner.get('value_stars', 0), 'value_ton': winner.get('value_ton', 0), 'timestamp': datetime.now().isoformat()})
             conn.execute('UPDATE users SET gift_items=? WHERE user_id=?', (json.dumps(gifts), uid))
-            
-            if winner_name not in ["💩 Ничего", "💩 Nothing"]:
-                try:
-                    tg_send(ADMIN_ID, f"🎉 <b>ВЫИГРЫШ!</b>\n\n👤 ID: <code>{uid}</code>\n🎁 Приз: {winner_name}\n💎 Ценность: {winner.get('value_ton', 0)} TON / {winner.get('value_stars', 0)} Stars")
-                except: pass
         
         new_ton = conn.execute('SELECT balance_ton FROM users WHERE user_id=?', (uid,)).fetchone()[0]
         new_stars = conn.execute('SELECT balance_stars FROM users WHERE user_id=?', (uid,)).fetchone()[0]
@@ -544,7 +536,6 @@ def api_open_case():
 @flask_app.route('/api/sell_item', methods=['POST'])
 def api_sell_item():
     data = request.json; uid = data.get('user_id'); idx = data.get('item_index')
-    logger.info(f"💰 Пользователь {uid} продаёт предмет (индекс: {idx})")
     with db_connect() as conn:
         row = conn.execute('SELECT gift_items, balance_ton, balance_stars FROM users WHERE user_id=?', (uid,)).fetchone()
         if not row: return jsonify({'error': 'Не найдено!'}), 404
@@ -553,13 +544,11 @@ def api_sell_item():
         item = gifts.pop(idx)
         vs = int(item.get('value_stars', 0) * 0.98); vt = round(item.get('value_ton', 0) * 0.98, 2)
         conn.execute('UPDATE users SET gift_items=?, balance_stars=balance_stars+?, balance_ton=balance_ton+? WHERE user_id=?', (json.dumps(gifts), vs, vt, uid))
-    logger.info(f"✅ Пользователь {uid} продал: {item['name']} за {vs} Stars и {vt} TON")
     return jsonify({'success': True, 'received_stars': vs, 'received_ton': vt, 'balance_ton': row[1] + vt, 'balance_stars': row[2] + vs})
 
 @flask_app.route('/api/withdraw_item', methods=['POST'])
 def api_withdraw_item():
     data = request.json; uid = data.get('user_id'); idx = data.get('item_index'); wallet = data.get('wallet', '')
-    logger.info(f"📤 Пользователь {uid} запросил вывод предмета (индекс: {idx}) на {wallet[:10]}...")
     with db_connect() as conn:
         row = conn.execute('SELECT gift_items, withdrawn_items FROM users WHERE user_id=?', (uid,)).fetchone()
         if not row: return jsonify({'error': 'Не найдено!'}), 404
@@ -568,7 +557,6 @@ def api_withdraw_item():
         item = gifts.pop(idx); item['withdrawn_at'] = datetime.now().isoformat(); item['wallet'] = wallet; item['status'] = 'completed'
         withdrawn.append(item)
         conn.execute('UPDATE users SET gift_items=?, withdrawn_items=? WHERE user_id=?', (json.dumps(gifts), json.dumps(withdrawn), uid))
-    logger.info(f"✅ Пользователь {uid} вывел: {item['name']} на {wallet[:10]}...")
     return jsonify({'success': True, 'message': f'✅ {item["name"]} выведен на {wallet[:10]}...', 'item': item})
 
 @flask_app.route('/api/language', methods=['POST'])
@@ -583,8 +571,6 @@ def api_create_stars_invoice():
     uid = data.get('user_id')
     amount = data.get('amount', 50)
     
-    logger.info(f"⭐ Пользователь {uid} создаёт счёт на {amount} Stars через WebApp")
-    
     charge_id = f"stars_{uid}_{int(time.time())}"
     with db_connect() as conn:
         conn.execute('INSERT INTO stars_payments (user_id, stars_amount, charge_id, status) VALUES (?,?,?,?)', (uid, amount, charge_id, 'pending'))
@@ -595,7 +581,6 @@ def api_create_stars_invoice():
         return jsonify({'success': True, 'charge_id': charge_id, 'message': f'Счёт на {amount} Stars отправлен!'})
     else:
         error_msg = result.get('description', 'Unknown error') if isinstance(result, dict) else str(result)
-        logger.error(f"❌ Ошибка создания счёта Stars для {uid}: {error_msg}")
         with db_connect() as conn:
             conn.execute('DELETE FROM stars_payments WHERE charge_id=?', (charge_id,))
         return jsonify({'success': False, 'error': error_msg})
@@ -615,17 +600,15 @@ def webhook():
                 charge_id = payment.get("telegram_payment_charge_id", "")
                 stars_amount = payment["total_amount"]
                 
-                logger.info(f"⭐ STARS PAYMENT! User: {uid}, Amount: {stars_amount}, Charge: {charge_id}")
-                
                 if payload.startswith("stars_deposit_"):
                     with db_connect() as conn:
-                        conn.execute('UPDATE users SET balance_stars=balance_stars+?, total_deposited_stars=total_deposited_stars+?, pending_stars_amount=NULL, pending_stars_charge_id=NULL WHERE user_id=?', (stars_amount, stars_amount, uid))
+                        conn.execute('UPDATE users SET balance_stars=balance_stars+?, total_deposited_stars=total_deposited_stars+? WHERE user_id=?', (stars_amount, stars_amount, uid))
                         conn.execute('INSERT INTO transactions (user_id, type, amount, currency, tx_hash) VALUES (?,?,?,?,?)', (uid, 'deposit_stars', stars_amount, 'STARS', charge_id))
-                        conn.execute('UPDATE stars_payments SET status=?, charge_id=? WHERE user_id=? AND status=?', ('completed', charge_id, uid, 'pending'))
+                        conn.execute('UPDATE stars_payments SET status=? WHERE user_id=? AND status=?', ('completed', uid, 'pending'))
                     
-                    tg_send(msg["chat"]["id"], f"✅ <b>ПЛАТЕЖ ПОДТВЕРЖДЁН!</b>\n\n⭐ +{stars_amount} Stars зачислено!\n💰 Звёзды реально списаны с вашего баланса\n\n🎁 Открывайте кейсы!")
-                    tg_send(ADMIN_ID, f"⭐ <b>ЗВЁЗДЫ ПОЛУЧЕНЫ!</b>\n\n👤 ID: <code>{uid}</code>\n⭐ Сумма: {stars_amount} Stars\n🔗 ID: <code>{charge_id}</code>\n\n✅ Проверьте баланс звёзд в Telegram!")
-                    logger.info(f"✅ Звёзды зачислены пользователю {uid} и отправлены админу!")
+                    tg_send(msg["chat"]["id"], f"✅ <b>ПЛАТЕЖ ПОДТВЕРЖДЁН!</b>\n\n⭐ +{stars_amount} Stars зачислено!\n\n🎁 Открывайте кейсы!")
+                    tg_send(ADMIN_ID, f"⭐ <b>ЗВЁЗДЫ ПОЛУЧЕНЫ!</b>\n\n👤 ID: <code>{uid}</code>\n⭐ Сумма: {stars_amount} Stars\n🔗 ID: <code>{charge_id}</code>")
+                    logger.info(f"⭐ Stars payment: {stars_amount} from {uid}")
                     
                     return "ok", 200
             

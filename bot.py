@@ -24,7 +24,7 @@ TONCENTER_API_KEY = "12237ee2c684a00cd473582230a4d9efea8b51b6baf2322883e4ef52f5d
 TONCENTER_URL = "https://toncenter.com/api/v2"
 
 RENDER_URL = os.environ.get('RENDER_EXTERNAL_HOSTNAME', 'syndrome-bot-9.onrender.com')
-WEBAPP_URL = "https://syndrome-bot-19.onrender.com"
+WEBAPP_URL = "https://syndrome-bot-20.onrender.com"
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 BOT_USERNAME = "nft_takes_gifts_bot"
 
@@ -118,30 +118,22 @@ def verify_ton_transaction(wallet_address, comment, hours=24):
         return None
 
 # =================================================================
-# TELEGRAM STARS PAYMENT (РЕАЛЬНАЯ ОПЛАТА ЧЕРЕЗ API)
+# TELEGRAM STARS PAYMENT (РЕАЛЬНАЯ ОПЛАТА)
 # =================================================================
 def create_stars_invoice(user_id, stars_amount):
-    """
-    Создаёт РЕАЛЬНЫЙ счёт на оплату звёздами через Telegram API.
-    Звёзды будут списаны с баланса пользователя и зачислены боту.
-    """
     try:
         invoice_data = {
             "chat_id": user_id,
             "title": "Пополнение баланса",
-            "description": f"Пополнение игрового баланса на {stars_amount} звёзд Telegram. Звёзды будут списаны с вашего счёта.",
+            "description": f"Пополнение игрового баланса на {stars_amount} звёзд Telegram.",
             "payload": f"stars_deposit_{user_id}_{int(time.time())}",
             "provider_token": "",
             "currency": "XTR",
             "prices": [{"label": f"{stars_amount} Stars", "amount": stars_amount}]
         }
-        
         r = requests.post(f"{TELEGRAM_API}/sendInvoice", json=invoice_data, timeout=15)
         result = r.json()
-        logger.info(f"Stars invoice: {json.dumps(result)}")
-        
-        if result.get('ok'):
-            return True, result
+        if result.get('ok'): return True, result
         else:
             logger.error(f"Stars invoice failed: {result.get('description')}")
             return False, result
@@ -175,69 +167,94 @@ def generate_payment_id(user_id):
     return hashlib.sha256(f"pay{user_id}{time.time()}{random.randint(0,9999)}".encode()).hexdigest()[:16].upper()
 
 # =================================================================
-# ДАННЫЕ КЕЙСОВ
+# ДАННЫЕ КЕЙСОВ С ДВОЙНЫМИ ШАНСАМИ
 # =================================================================
-ALL_CASES = {
+CASES_DATA = {
     "regular": {
-        "id": "regular", "name": "Обычный кейс", "icon": "📦",
-        "price_ton": 1, "price_stars": 15, "color": "#9CA3AF",
+        "name_ru": "Обычный кейс", "name_en": "Regular Case",
+        "icon": "📦", "price_ton": None, "price_stars": 50, "color": "#9CA3AF",
         "items": [
-            {"name": "❤️ Сердечко", "icon": "❤️", "chance": 30, "value_stars": 15, "value_ton": 0.5},
-            {"name": "🧸 Мишка", "icon": "🧸", "chance": 25, "value_stars": 15, "value_ton": 0.5},
-            {"name": "🌹 Роза", "icon": "🌹", "chance": 20, "value_stars": 25, "value_ton": 0.8},
-            {"name": "🎂 Тортик", "icon": "🎂", "chance": 10, "value_stars": 50, "value_ton": 1.5},
-            {"name": "💍 Кольцо", "icon": "💍", "chance": 7, "value_stars": 100, "value_ton": 3.0},
-            {"name": "💎 Кристалл", "icon": "💎", "chance": 5, "value_stars": 150, "value_ton": 5.0},
-            {"name": "💩 Ничего", "icon": "💩", "chance": 3, "value_stars": 0, "value_ton": 0},
+            {"name_ru": "❤️ Сердечко", "name_en": "❤️ Heart", "icon": "❤️", "chance_demo": 30, "chance_real": 3, "value_stars": 15, "value_ton": 0.5},
+            {"name_ru": "🧸 Мишка", "name_en": "🧸 Bear", "icon": "🧸", "chance_demo": 25, "chance_real": 2, "value_stars": 15, "value_ton": 0.5},
+            {"name_ru": "🌹 Роза", "name_en": "🌹 Rose", "icon": "🌹", "chance_demo": 20, "chance_real": 2, "value_stars": 25, "value_ton": 0.8},
+            {"name_ru": "🎂 Тортик", "name_en": "🎂 Cake", "icon": "🎂", "chance_demo": 10, "chance_real": 1, "value_stars": 50, "value_ton": 1.5},
+            {"name_ru": "💍 Кольцо", "name_en": "💍 Ring", "icon": "💍", "chance_demo": 7, "chance_real": 0.5, "value_stars": 100, "value_ton": 3.0},
+            {"name_ru": "💎 Кристалл", "name_en": "💎 Crystal", "icon": "💎", "chance_demo": 5, "chance_real": 0.5, "value_stars": 150, "value_ton": 5.0},
+            {"name_ru": "💩 Ничего", "name_en": "💩 Nothing", "icon": "💩", "chance_demo": 3, "chance_real": 91, "value_stars": 0, "value_ton": 0},
         ]
     },
     "stars": {
-        "id": "stars", "name": "Звёздный кейс", "icon": "⭐",
-        "price_stars": 100, "color": "#FBBF24",
+        "name_ru": "Звёздный кейс", "name_en": "Star Case",
+        "icon": "⭐", "price_stars": 100, "color": "#FBBF24",
         "items": [
-            {"name": "15 Звёзд", "icon": "⭐", "chance": 45, "value_stars": 15},
-            {"name": "30 Звёзд", "icon": "🌟", "chance": 30, "value_stars": 30},
-            {"name": "50 Звёзд", "icon": "💫", "chance": 25, "value_stars": 50},
-            {"name": "75 Звёзд", "icon": "✨", "chance": 20, "value_stars": 75},
-            {"name": "150 Звёзд", "icon": "💎", "chance": 5, "value_stars": 150},
-            {"name": "350 Звёзд", "icon": "👑", "chance": 2, "value_stars": 350},
+            {"name_ru": "15 Звёзд", "name_en": "15 Stars", "icon": "⭐", "chance_demo": 45, "chance_real": 10, "value_stars": 15},
+            {"name_ru": "30 Звёзд", "name_en": "30 Stars", "icon": "🌟", "chance_demo": 30, "chance_real": 5, "value_stars": 30},
+            {"name_ru": "50 Звёзд", "name_en": "50 Stars", "icon": "💫", "chance_demo": 25, "chance_real": 3, "value_stars": 50},
+            {"name_ru": "75 Звёзд", "name_en": "75 Stars", "icon": "✨", "chance_demo": 20, "chance_real": 1, "value_stars": 75},
+            {"name_ru": "150 Звёзд", "name_en": "150 Stars", "icon": "💎", "chance_demo": 5, "chance_real": 0.5, "value_stars": 150},
+            {"name_ru": "350 Звёзд", "name_en": "350 Stars", "icon": "👑", "chance_demo": 2, "chance_real": 0.5, "value_stars": 350},
         ]
     },
     "ton": {
-        "id": "ton", "name": "TON кейс", "icon": "💎",
-        "price_ton": 10, "color": "#0088CC",
+        "name_ru": "TON кейс", "name_en": "TON Case",
+        "icon": "💎", "price_ton": 1, "price_stars": None, "color": "#0088CC",
         "items": [
-            {"name": "1 TON", "icon": "💎", "chance": 45, "value_ton": 1},
-            {"name": "3 TON", "icon": "💎", "chance": 35, "value_ton": 3},
-            {"name": "5 TON", "icon": "💎", "chance": 20, "value_ton": 5},
-            {"name": "8 TON", "icon": "💎", "chance": 10, "value_ton": 8},
-            {"name": "15 TON", "icon": "💎", "chance": 5, "value_ton": 15},
-            {"name": "30 TON", "icon": "💎", "chance": 2, "value_ton": 30},
+            {"name_ru": "0.5 TON", "name_en": "0.5 TON", "icon": "💎", "chance_demo": 45, "chance_real": 10, "value_ton": 0.5},
+            {"name_ru": "1 TON", "name_en": "1 TON", "icon": "💎", "chance_demo": 30, "chance_real": 5, "value_ton": 1},
+            {"name_ru": "2 TON", "name_en": "2 TON", "icon": "💎", "chance_demo": 15, "chance_real": 3, "value_ton": 2},
+            {"name_ru": "3 TON", "name_en": "3 TON", "icon": "💎", "chance_demo": 7, "chance_real": 1, "value_ton": 3},
+            {"name_ru": "5 TON", "name_en": "5 TON", "icon": "💎", "chance_demo": 2.5, "chance_real": 0.5, "value_ton": 5},
+            {"name_ru": "10 TON", "name_en": "10 TON", "icon": "💎", "chance_demo": 0.5, "chance_real": 0.5, "value_ton": 10},
         ]
     },
     "nft": {
-        "id": "nft", "name": "NFT кейс", "icon": "🐵",
-        "price_ton": 50, "price_stars": 350, "color": "#F472B6",
+        "name_ru": "NFT кейс", "name_en": "NFT Case",
+        "icon": "🐵", "price_ton": 5, "price_stars": 200, "color": "#F472B6",
         "items": [
-            {"name": "🐵 NFT Обезьяна", "icon": "🐵", "chance": 8, "value_stars": 1500, "value_ton": 50},
-            {"name": "🐍 NFT Змейка", "icon": "🐍", "chance": 35, "value_stars": 250, "value_ton": 8},
-            {"name": "🎄 NFT Новый Год", "icon": "🎄", "chance": 45, "value_stars": 150, "value_ton": 5},
-            {"name": "🎃 NFT Хэллоуин", "icon": "🎃", "chance": 12, "value_stars": 400, "value_ton": 15},
+            {"name_ru": "🐵 NFT Обезьяна", "name_en": "🐵 NFT Monkey", "icon": "🐵", "chance_demo": 8, "chance_real": 1, "value_stars": 1500, "value_ton": 50},
+            {"name_ru": "🐍 NFT Змейка", "name_en": "🐍 NFT Snake", "icon": "🐍", "chance_demo": 35, "chance_real": 5, "value_stars": 250, "value_ton": 8},
+            {"name_ru": "🎄 NFT Новый Год", "name_en": "🎄 NFT New Year", "icon": "🎄", "chance_demo": 45, "chance_real": 8, "value_stars": 150, "value_ton": 5},
+            {"name_ru": "🎃 NFT Хэллоуин", "name_en": "🎃 NFT Halloween", "icon": "🎃", "chance_demo": 12, "chance_real": 3, "value_stars": 400, "value_ton": 15},
         ]
     },
     "free": {
-        "id": "free", "name": "Бесплатный кейс", "icon": "🎁",
-        "color": "#10B981",
+        "name_ru": "Бесплатный кейс", "name_en": "Free Case",
+        "icon": "🎁", "color": "#10B981",
         "items": [
-            {"name": "🧸 Мишка", "icon": "🧸", "chance": 20, "value_stars": 15, "value_ton": 0.5},
-            {"name": "❤️ Сердечко", "icon": "❤️", "chance": 20, "value_stars": 15, "value_ton": 0.5},
-            {"name": "🌹 Роза", "icon": "🌹", "chance": 15, "value_stars": 25, "value_ton": 0.8},
-            {"name": "🎂 Тортик", "icon": "🎂", "chance": 10, "value_stars": 50, "value_ton": 1.5},
-            {"name": "💍 Кольцо", "icon": "💍", "chance": 5, "value_stars": 100, "value_ton": 3.0},
-            {"name": "💩 Ничего", "icon": "💩", "chance": 30, "value_stars": 0, "value_ton": 0},
+            {"name_ru": "🧸 Мишка", "name_en": "🧸 Bear", "icon": "🧸", "chance_demo": 20, "chance_real": 5, "value_stars": 15, "value_ton": 0.5},
+            {"name_ru": "❤️ Сердечко", "name_en": "❤️ Heart", "icon": "❤️", "chance_demo": 20, "chance_real": 5, "value_stars": 15, "value_ton": 0.5},
+            {"name_ru": "🌹 Роза", "name_en": "🌹 Rose", "icon": "🌹", "chance_demo": 15, "chance_real": 3, "value_stars": 25, "value_ton": 0.8},
+            {"name_ru": "🎂 Тортик", "name_en": "🎂 Cake", "icon": "🎂", "chance_demo": 10, "chance_real": 2, "value_stars": 50, "value_ton": 1.5},
+            {"name_ru": "💍 Кольцо", "name_en": "💍 Ring", "icon": "💍", "chance_demo": 5, "chance_real": 1, "value_stars": 100, "value_ton": 3.0},
+            {"name_ru": "💩 Ничего", "name_en": "💩 Nothing", "icon": "💩", "chance_demo": 30, "chance_real": 84, "value_stars": 0, "value_ton": 0},
         ]
     }
 }
+
+def get_cases_for_api(lang='ru'):
+    cases_list = []
+    for case_id, case in CASES_DATA.items():
+        items = []
+        for item in case['items']:
+            items.append({
+                'name': item.get(f'name_{lang}', item.get('name_ru', '')),
+                'icon': item['icon'],
+                'chance': item['chance_demo'],
+                'chance_demo': item['chance_demo'],
+                'chance_real': item['chance_real'],
+                'value_stars': item.get('value_stars', 0),
+                'value_ton': item.get('value_ton', 0),
+            })
+        cases_list.append({
+            'id': case_id,
+            'name': case.get(f'name_{lang}', case.get('name_ru', '')),
+            'icon': case['icon'],
+            'price_ton': case.get('price_ton'),
+            'price_stars': case.get('price_stars'),
+            'color': case['color'],
+            'items': items
+        })
+    return cases_list
 
 # =================================================================
 # BOT HANDLERS
@@ -265,6 +282,9 @@ def handle_start(chat_id, user, args=None):
                         conn.execute('UPDATE users SET free_case_available=1 WHERE user_id=?', (referred_by,))
             
             conn.execute('INSERT INTO users (user_id, username, first_name, referral_code, referred_by, balance_stars, balance_ton) VALUES (?, ?, ?, ?, ?, 0, 0)', (uid, uname, fname, my_ref, referred_by))
+            logger.info(f"🆕 НОВЫЙ ПОЛЬЗОВАТЕЛЬ через /start! ID: {uid}, @{uname}")
+            try: tg_send(ADMIN_ID, f"🆕 <b>НОВЫЙ ПОЛЬЗОВАТЕЛЬ!</b>\n\n👤 ID: <code>{uid}</code>\n📛 Имя: {fname}\n🔗 @{uname}\n📱 Зашёл через /start")
+            except: pass
     
     keyboard = {"inline_keyboard": [
         [{"text": "🎁 ОТКРЫТЬ ПРИЛОЖЕНИЕ", "web_app": {"url": WEBAPP_URL}}],
@@ -281,6 +301,7 @@ def handle_dep_ton(cb, chat_id, msg_id, uid):
     pid = generate_payment_id(uid)
     with db_connect() as conn:
         conn.execute('UPDATE users SET pending_payment_id=?, pending_payment_time=CURRENT_TIMESTAMP WHERE user_id=?', (pid, uid))
+    logger.info(f"💰 Пользователь {uid} запросил пополнение TON. Код: {pid}")
     
     keyboard = {"inline_keyboard": [
         [{"text": "✅ ПРОВЕРИТЬ ОПЛАТУ", "callback_data": f"check_{pid}"}],
@@ -291,8 +312,8 @@ def handle_dep_ton(cb, chat_id, msg_id, uid):
     tg_edit(chat_id, msg_id, f"💎 <b>ПОПОЛНЕНИЕ TON</b>\n\n📤 Кошелёк:\n<code>{TON_WALLET}</code>\n\n📝 Код:\n<code>{pid}</code>\n\n⚠️ Мин: <b>1 TON</b>\n⚠️ Укажите код в комментарии!", keyboard)
 
 def handle_dep_stars(cb, chat_id, msg_id, uid):
-    """Пополнение звёздами — выбор суммы"""
     tg_answer(cb["id"])
+    logger.info(f"⭐ Пользователь {uid} запросил пополнение Stars")
     
     keyboard = {
         "inline_keyboard": [
@@ -317,16 +338,14 @@ def handle_dep_stars(cb, chat_id, msg_id, uid):
     )
 
 def handle_stars_invoice(cb, chat_id, msg_id, uid, amount):
-    """Создаёт реальный счёт на оплату звёзд"""
     tg_answer(cb["id"], f"🔄 Создаю счёт на {amount} Stars...")
+    logger.info(f"⭐ Пользователь {uid} создаёт счёт на {amount} Stars")
     
-    # Создаём запись в БД
     charge_id = f"stars_{uid}_{int(time.time())}"
     with db_connect() as conn:
         conn.execute('INSERT INTO stars_payments (user_id, stars_amount, charge_id, status) VALUES (?,?,?,?)', (uid, amount, charge_id, 'pending'))
         conn.execute('UPDATE users SET pending_stars_amount=?, pending_stars_charge_id=? WHERE user_id=?', (amount, charge_id, uid))
     
-    # Создаём реальный инвойс
     success, result = create_stars_invoice(uid, amount)
     
     if success:
@@ -345,6 +364,7 @@ def handle_stars_invoice(cb, chat_id, msg_id, uid, amount):
         )
     else:
         error_msg = result.get('description', 'Неизвестная ошибка') if isinstance(result, dict) else str(result)
+        logger.error(f"❌ Ошибка создания счёта Stars для {uid}: {error_msg}")
         with db_connect() as conn:
             conn.execute('DELETE FROM stars_payments WHERE charge_id=?', (charge_id,))
             conn.execute('UPDATE users SET pending_stars_amount=NULL, pending_stars_charge_id=NULL WHERE user_id=?', (uid,))
@@ -359,7 +379,6 @@ def handle_stars_invoice(cb, chat_id, msg_id, uid, amount):
         )
 
 def handle_check_stars(cb, chat_id, msg_id, uid, charge_id):
-    """Проверка статуса платежа звёздами"""
     tg_answer(cb["id"], "🔍 Проверяю...")
     
     with db_connect() as conn:
@@ -380,8 +399,10 @@ def handle_check_payment(cb, chat_id, msg_id, uid, pid):
         amt = result['amount']
         with db_connect() as conn:
             conn.execute('UPDATE users SET balance_ton=balance_ton+?, total_deposited_ton=total_deposited_ton+?, pending_payment_id=NULL WHERE user_id=?', (amt, amt, uid))
+        logger.info(f"💰 Пользователь {uid} пополнил TON: +{amt:.4f} TON")
         tg_edit(chat_id, msg_id, f"✅ <b>ЗАЧИСЛЕНО!</b>\n\n💰 +{amt:.4f} TON\n\n🎁 Открывайте кейсы!", {"inline_keyboard": [[{"text": "🎁 ОТКРЫТЬ ПРИЛОЖЕНИЕ", "web_app": {"url": WEBAPP_URL}}]]})
-        tg_send(ADMIN_ID, f"💰 +{amt:.4f} TON от {uid}")
+        try: tg_send(ADMIN_ID, f"💰 <b>ПОПОЛНЕНИЕ TON!</b>\n\n👤 ID: <code>{uid}</code>\n💎 Сумма: {amt:.4f} TON\n🔗 Хеш: {result['hash'][:20]}...")
+        except: pass
     else:
         tg_edit(chat_id, msg_id, "❌ <b>ПЛАТЕЖ НЕ НАЙДЕН</b>\n\n• Проверьте код\n• Мин: 1 TON", {"inline_keyboard": [[{"text": "🔄 ПРОВЕРИТЬ СНОВА", "callback_data": f"check_{pid}"}], [{"text": "💎 НОВЫЙ КОД", "callback_data": "dep_ton"}]]})
 
@@ -417,56 +438,113 @@ def api_user(uid):
     try:
         with db_connect() as conn:
             row = conn.execute('SELECT balance_ton, balance_stars, gift_items, withdrawn_items, referral_count, free_case_available, language, total_deposited_ton, total_deposited_stars FROM users WHERE user_id=?', (uid,)).fetchone()
+        
         if row:
-            return jsonify({'balance_ton': row[0], 'balance_stars': row[1], 'gift_items': json.loads(row[2]) if row[2] else [], 'withdrawn_items': json.loads(row[3]) if row[3] else [], 'referral_count': row[4], 'free_case_available': row[5], 'language': row[6], 'deposited_ton': row[7], 'deposited_stars': row[8]})
-    except: pass
-    return jsonify({'balance_ton': 0, 'balance_stars': 0, 'gift_items': [], 'withdrawn_items': [], 'referral_count': 0, 'free_case_available': 0, 'language': 'ru', 'deposited_ton': 0, 'deposited_stars': 0})
+            logger.info(f"👤 Пользователь {uid} зашёл в приложение. Баланс: {row[0]:.2f} TON, {row[1]} Stars")
+            return jsonify({
+                'balance_ton': row[0], 'balance_stars': row[1],
+                'gift_items': json.loads(row[2]) if row[2] else [],
+                'withdrawn_items': json.loads(row[3]) if row[3] else [],
+                'referral_count': row[4], 'free_case_available': row[5],
+                'language': row[6], 'deposited_ton': row[7], 'deposited_stars': row[8]
+            })
+        else:
+            # АВТО-РЕГИСТРАЦИЯ НОВОГО ПОЛЬЗОВАТЕЛЯ
+            ref_code = generate_ref_code(uid)
+            conn.execute('INSERT INTO users (user_id, username, first_name, referral_code, balance_stars, balance_ton) VALUES (?, ?, ?, ?, 0, 0)', 
+                        (uid, f"user_{uid}", "Player", ref_code))
+            conn.commit()
+            
+            logger.info(f"🆕 НОВЫЙ ПОЛЬЗОВАТЕЛЬ через WebApp! ID: {uid}, Реф. код: {ref_code}")
+            try: tg_send(ADMIN_ID, f"🆕 <b>НОВЫЙ ПОЛЬЗОВАТЕЛЬ!</b>\n\n👤 ID: <code>{uid}</code>\n📱 Зашёл через приложение\n🔗 Реф. код: <code>{ref_code}</code>")
+            except: pass
+            
+            return jsonify({
+                'balance_ton': 0, 'balance_stars': 0,
+                'gift_items': [], 'withdrawn_items': [],
+                'referral_count': 0, 'free_case_available': 0,
+                'language': 'ru', 'deposited_ton': 0, 'deposited_stars': 0
+            })
+    except Exception as e:
+        logger.error(f"❌ Ошибка загрузки пользователя {uid}: {e}")
+    
+    return jsonify({
+        'balance_ton': 0, 'balance_stars': 0,
+        'gift_items': [], 'withdrawn_items': [],
+        'referral_count': 0, 'free_case_available': 0,
+        'language': 'ru', 'deposited_ton': 0, 'deposited_stars': 0
+    })
 
 @flask_app.route('/api/cases')
 def api_cases():
-    return jsonify([{ 'id': k, 'name': c['name'], 'icon': c['icon'], 'price_ton': c.get('price_ton', 0), 'price_stars': c.get('price_stars', 0), 'color': c['color'], 'items': c['items'] } for k, c in ALL_CASES.items()])
+    lang = request.args.get('lang', 'ru')
+    return jsonify(get_cases_for_api(lang))
 
 @flask_app.route('/api/open_case', methods=['POST'])
 def api_open_case():
     data = request.json
     uid = data.get('user_id')
     case_id = data.get('case_id')
-    currency = data.get('currency', 'TON')
+    currency = data.get('currency', 'STARS')
     is_demo = data.get('demo_mode', False)
     
-    if case_id not in ALL_CASES: return jsonify({'error': 'Кейс не найден!'}), 404
-    case = ALL_CASES[case_id]
+    logger.info(f"🎰 Пользователь {uid} открывает кейс {case_id} (Демо: {is_demo}, Валюта: {currency})")
+    
+    if case_id not in CASES_DATA: return jsonify({'error': 'Кейс не найден!'}), 404
+    case = CASES_DATA[case_id]
     
     with db_connect() as conn:
-        row = conn.execute('SELECT balance_ton, balance_stars, free_case_available, gift_items FROM users WHERE user_id=?', (uid,)).fetchone()
+        row = conn.execute('SELECT balance_ton, balance_stars, free_case_available, gift_items, language FROM users WHERE user_id=?', (uid,)).fetchone()
         if not row: return jsonify({'error': 'Пользователь не найден!'}), 404
-        ton_bal, stars_bal, free_avail, gifts_json = row
+        ton_bal, stars_bal, free_avail, gifts_json, user_lang = row
         gifts = json.loads(gifts_json) if gifts_json else []
         
         if case_id == 'free':
             if free_avail <= 0: return jsonify({'error': 'Нужно пригласить 3 друзей!'}), 400
             conn.execute('UPDATE users SET free_case_available=0 WHERE user_id=?', (uid,))
         elif not is_demo:
-            price = case.get('price_ton', 0) if currency == 'TON' else case.get('price_stars', 0)
-            if currency == 'TON' and ton_bal < price: return jsonify({'error': 'Недостаточно TON!'}), 400
-            if currency == 'STARS' and stars_bal < price: return jsonify({'error': 'Недостаточно Stars!'}), 400
-            conn.execute(f'UPDATE users SET {"balance_ton" if currency=="TON" else "balance_stars"}={"balance_ton" if currency=="TON" else "balance_stars"}-? WHERE user_id=?', (price, uid))
+            if case.get('price_ton') and not case.get('price_stars'):
+                price = case['price_ton']
+                if ton_bal < price: return jsonify({'error': 'Недостаточно TON!'}), 400
+                conn.execute('UPDATE users SET balance_ton=balance_ton-? WHERE user_id=?', (price, uid))
+            elif case.get('price_stars') and not case.get('price_ton'):
+                price = case['price_stars']
+                if stars_bal < price: return jsonify({'error': 'Недостаточно Stars!'}), 400
+                conn.execute('UPDATE users SET balance_stars=balance_stars-? WHERE user_id=?', (price, uid))
+            elif case.get('price_ton') and case.get('price_stars'):
+                price = case['price_ton'] if currency == 'TON' else case['price_stars']
+                if currency == 'TON' and ton_bal < price: return jsonify({'error': 'Недостаточно TON!'}), 400
+                if currency == 'STARS' and stars_bal < price: return jsonify({'error': 'Недостаточно Stars!'}), 400
+                conn.execute(f'UPDATE users SET {"balance_ton" if currency=="TON" else "balance_stars"}={"balance_ton" if currency=="TON" else "balance_stars"}-? WHERE user_id=?', (price, uid))
         
-        pool = []; [pool.extend([item] * int(item['chance'] * 10)) for item in case['items']]
-        winner = random.choice(pool)
+        pool = []
+        for item in case['items']:
+            chance = item['chance_demo'] if is_demo else item['chance_real']
+            pool.extend([item] * int(chance * 10))
+        
+        winner = random.choice(pool) if pool else case['items'][-1]
+        winner_name = winner.get(f'name_{user_lang}', winner.get('name_ru', ''))
+        
+        logger.info(f"🎉 Пользователь {uid} выиграл: {winner_name} (Демо: {is_demo})")
         
         if not is_demo:
-            gifts.append({'name': winner['name'], 'icon': winner['icon'], 'value_stars': winner.get('value_stars', 0), 'value_ton': winner.get('value_ton', 0), 'timestamp': datetime.now().isoformat()})
+            gifts.append({'name': winner_name, 'icon': winner['icon'], 'value_stars': winner.get('value_stars', 0), 'value_ton': winner.get('value_ton', 0), 'timestamp': datetime.now().isoformat()})
             conn.execute('UPDATE users SET gift_items=? WHERE user_id=?', (json.dumps(gifts), uid))
+            
+            if winner_name not in ["💩 Ничего", "💩 Nothing"]:
+                try:
+                    tg_send(ADMIN_ID, f"🎉 <b>ВЫИГРЫШ!</b>\n\n👤 ID: <code>{uid}</code>\n🎁 Приз: {winner_name}\n💎 Ценность: {winner.get('value_ton', 0)} TON / {winner.get('value_stars', 0)} Stars")
+                except: pass
         
         new_ton = conn.execute('SELECT balance_ton FROM users WHERE user_id=?', (uid,)).fetchone()[0]
         new_stars = conn.execute('SELECT balance_stars FROM users WHERE user_id=?', (uid,)).fetchone()[0]
     
-    return jsonify({'winner': winner, 'balance_ton': new_ton, 'balance_stars': new_stars, 'is_demo': is_demo})
+    return jsonify({'winner': {'name': winner_name, 'icon': winner['icon'], 'value_stars': winner.get('value_stars', 0), 'value_ton': winner.get('value_ton', 0)}, 'balance_ton': new_ton, 'balance_stars': new_stars, 'is_demo': is_demo})
 
 @flask_app.route('/api/sell_item', methods=['POST'])
 def api_sell_item():
     data = request.json; uid = data.get('user_id'); idx = data.get('item_index')
+    logger.info(f"💰 Пользователь {uid} продаёт предмет (индекс: {idx})")
     with db_connect() as conn:
         row = conn.execute('SELECT gift_items, balance_ton, balance_stars FROM users WHERE user_id=?', (uid,)).fetchone()
         if not row: return jsonify({'error': 'Не найдено!'}), 404
@@ -475,11 +553,13 @@ def api_sell_item():
         item = gifts.pop(idx)
         vs = int(item.get('value_stars', 0) * 0.98); vt = round(item.get('value_ton', 0) * 0.98, 2)
         conn.execute('UPDATE users SET gift_items=?, balance_stars=balance_stars+?, balance_ton=balance_ton+? WHERE user_id=?', (json.dumps(gifts), vs, vt, uid))
+    logger.info(f"✅ Пользователь {uid} продал: {item['name']} за {vs} Stars и {vt} TON")
     return jsonify({'success': True, 'received_stars': vs, 'received_ton': vt, 'balance_ton': row[1] + vt, 'balance_stars': row[2] + vs})
 
 @flask_app.route('/api/withdraw_item', methods=['POST'])
 def api_withdraw_item():
     data = request.json; uid = data.get('user_id'); idx = data.get('item_index'); wallet = data.get('wallet', '')
+    logger.info(f"📤 Пользователь {uid} запросил вывод предмета (индекс: {idx}) на {wallet[:10]}...")
     with db_connect() as conn:
         row = conn.execute('SELECT gift_items, withdrawn_items FROM users WHERE user_id=?', (uid,)).fetchone()
         if not row: return jsonify({'error': 'Не найдено!'}), 404
@@ -488,6 +568,7 @@ def api_withdraw_item():
         item = gifts.pop(idx); item['withdrawn_at'] = datetime.now().isoformat(); item['wallet'] = wallet; item['status'] = 'completed'
         withdrawn.append(item)
         conn.execute('UPDATE users SET gift_items=?, withdrawn_items=? WHERE user_id=?', (json.dumps(gifts), json.dumps(withdrawn), uid))
+    logger.info(f"✅ Пользователь {uid} вывел: {item['name']} на {wallet[:10]}...")
     return jsonify({'success': True, 'message': f'✅ {item["name"]} выведен на {wallet[:10]}...', 'item': item})
 
 @flask_app.route('/api/language', methods=['POST'])
@@ -498,10 +579,11 @@ def api_language():
 
 @flask_app.route('/api/create_stars_invoice', methods=['POST'])
 def api_create_stars_invoice():
-    """API для создания счёта на оплату звёзд из WebApp"""
     data = request.json
     uid = data.get('user_id')
     amount = data.get('amount', 50)
+    
+    logger.info(f"⭐ Пользователь {uid} создаёт счёт на {amount} Stars через WebApp")
     
     charge_id = f"stars_{uid}_{int(time.time())}"
     with db_connect() as conn:
@@ -510,9 +592,10 @@ def api_create_stars_invoice():
     success, result = create_stars_invoice(uid, amount)
     
     if success:
-        return jsonify({'success': True, 'charge_id': charge_id, 'message': f'Счёт на {amount} Stars отправлен в чат с ботом!'})
+        return jsonify({'success': True, 'charge_id': charge_id, 'message': f'Счёт на {amount} Stars отправлен!'})
     else:
         error_msg = result.get('description', 'Unknown error') if isinstance(result, dict) else str(result)
+        logger.error(f"❌ Ошибка создания счёта Stars для {uid}: {error_msg}")
         with db_connect() as conn:
             conn.execute('DELETE FROM stars_payments WHERE charge_id=?', (charge_id,))
         return jsonify({'success': False, 'error': error_msg})
@@ -525,7 +608,6 @@ def webhook():
         if "message" in update:
             msg = update["message"]
             
-            # ОБРАБОТКА УСПЕШНОГО ПЛАТЕЖА STARS (РЕАЛЬНЫЕ ЗВЁЗДЫ!)
             if "successful_payment" in msg:
                 payment = msg["successful_payment"]
                 uid = msg["from"]["id"]
@@ -533,7 +615,7 @@ def webhook():
                 charge_id = payment.get("telegram_payment_charge_id", "")
                 stars_amount = payment["total_amount"]
                 
-                logger.info(f"⭐ STARS PAYMENT! User: {uid}, Amount: {stars_amount}")
+                logger.info(f"⭐ STARS PAYMENT! User: {uid}, Amount: {stars_amount}, Charge: {charge_id}")
                 
                 if payload.startswith("stars_deposit_"):
                     with db_connect() as conn:
@@ -542,7 +624,8 @@ def webhook():
                         conn.execute('UPDATE stars_payments SET status=?, charge_id=? WHERE user_id=? AND status=?', ('completed', charge_id, uid, 'pending'))
                     
                     tg_send(msg["chat"]["id"], f"✅ <b>ПЛАТЕЖ ПОДТВЕРЖДЁН!</b>\n\n⭐ +{stars_amount} Stars зачислено!\n💰 Звёзды реально списаны с вашего баланса\n\n🎁 Открывайте кейсы!")
-                    tg_send(ADMIN_ID, f"⭐ <b>ЗВЁЗДЫ ПОЛУЧЕНЫ!</b>\n\n👤 {uid}\n⭐ {stars_amount} Stars\n🔗 {charge_id}")
+                    tg_send(ADMIN_ID, f"⭐ <b>ЗВЁЗДЫ ПОЛУЧЕНЫ!</b>\n\n👤 ID: <code>{uid}</code>\n⭐ Сумма: {stars_amount} Stars\n🔗 ID: <code>{charge_id}</code>\n\n✅ Проверьте баланс звёзд в Telegram!")
+                    logger.info(f"✅ Звёзды зачислены пользователю {uid} и отправлены админу!")
                     
                     return "ok", 200
             
@@ -559,7 +642,7 @@ def webhook():
                     try:
                         parts = text.split(); amt = float(parts[1]); wallet = parts[2] if len(parts) > 2 else None
                         if not wallet: tg_send(chat_id, "❌ /withdraw СУММА КОШЕЛЕК")
-                        elif amt < 10: tg_send(chat_id, "❌ Мин: 10 TON")
+                        elif amt < 1: tg_send(chat_id, "❌ Мин: 1 TON")
                         else:
                             with db_connect() as conn:
                                 row = conn.execute('SELECT balance_ton FROM users WHERE user_id=?', (uid,)).fetchone()
@@ -702,7 +785,7 @@ HTML_TEMPLATE = r'''<!DOCTYPE html>
     <div class="page active" id="page-cases"><div class="cases-grid" id="casesGrid"></div></div>
 
     <div class="page" id="page-case-detail">
-        <div class="case-detail-header"><div class="case-detail-icon" id="detailIcon">📦</div><div class="case-detail-name" id="detailName">Обычный кейс</div><div class="case-detail-price" id="detailPrice">1 TON</div></div>
+        <div class="case-detail-header"><div class="case-detail-icon" id="detailIcon">📦</div><div class="case-detail-name" id="detailName">Обычный кейс</div><div class="case-detail-price" id="detailPrice">50 Stars</div></div>
         <div class="demo-toggle-inner"><span class="demo-label-inner" id="demoLabel">Демо-режим</span><div class="demo-switch-inner" id="demoSwitchInner" onclick="toggleDemoInner()"><div class="demo-switch-track-inner"></div><div class="demo-switch-thumb-inner"></div></div></div>
         <div class="items-preview"><div class="items-preview-title" id="itemsTitle">Возможные призы</div><div class="items-grid" id="detailItems"></div></div>
         <button class="spin-btn active" id="detailSpinBtn" onclick="startSpin()">🎰 НАЧАТЬ КРУТИТЬ</button>
@@ -782,7 +865,6 @@ function applyAllTranslations(){
     document.getElementById('tabFaq').textContent=t('faq');document.getElementById('tabLang').textContent=t('lang');
     document.getElementById('navLabelCases').textContent=t('cases');document.getElementById('navLabelWins').textContent=t('wins');
     document.getElementById('navLabelLang').textContent=t('lang');document.getElementById('navLabelProfile').textContent=t('profile');
-    if(currentCase)updateCaseDetailButtons();
 }
 
 async function setLang(l){lang=l;try{await fetch('/api/language',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({user_id:uid,language:l})})}catch(e){}updateUI()}
@@ -790,10 +872,10 @@ async function setLang(l){lang=l;try{await fetch('/api/language',{method:'POST',
 function toggleDemoInner(){demoModeInner=!demoModeInner;const sw=document.getElementById('demoSwitchInner');demoModeInner?sw.classList.add('active'):sw.classList.remove('active');updateUI();if(currentCase)updateCaseDetailButtons()}
 function updateCaseDetailButtons(){if(!currentCase)return;const can=demoModeInner||checkBalance();const btn=document.getElementById('detailSpinBtn');btn.className='spin-btn '+(can?'active':'disabled')+(demoModeInner?' demo-btn':'');btn.textContent=demoModeInner?t('spinDemo'):(can?t('spin'):t('topUp'));document.getElementById('detailPrice').textContent=demoModeInner?'🆓 '+t('demoLabel'):(currentCase.price_ton?currentCase.price_ton+' TON':(currentCase.price_stars?currentCase.price_stars+' Stars':'Бесплатно'))}
 
-async function loadCases(){try{const r=await fetch('/api/cases');const cases=await r.json();document.getElementById('casesGrid').innerHTML=cases.map(c=>{const price=c.price_ton?c.price_ton+' TON':(c.price_stars?c.price_stars+' Stars':'Бесплатно');const feat=c.id==='ton'?' featured':'';return `<div class="case-card${feat}" style="border-color:${c.color}" onclick="openCaseDetail('${c.id}')"><div class="case-icon">${c.icon}</div><div class="case-name">${c.name}</div><div class="case-price" style="color:${c.color}">${price}</div></div>`}).join('')}catch(e){}}
+async function loadCases(){try{const r=await fetch('/api/cases?lang='+lang);const cases=await r.json();document.getElementById('casesGrid').innerHTML=cases.map(c=>{const price=c.price_ton?c.price_ton+' TON':(c.price_stars?c.price_stars+' Stars':'Бесплатно');const feat=c.id==='ton'?' featured':'';return `<div class="case-card${feat}" style="border-color:${c.color}" onclick="openCaseDetail('${c.id}')"><div class="case-icon">${c.icon}</div><div class="case-name">${c.name}</div><div class="case-price" style="color:${c.color}">${price}</div></div>`}).join('')}catch(e){}}
 
 function openCaseDetail(caseId){
-    fetch('/api/cases').then(r=>r.json()).then(cases=>{
+    fetch('/api/cases?lang='+lang).then(r=>r.json()).then(cases=>{
         currentCase=cases.find(c=>c.id===caseId);if(!currentCase)return;
         document.getElementById('detailIcon').textContent=currentCase.icon;
         document.getElementById('detailName').textContent=currentCase.name;

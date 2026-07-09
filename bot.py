@@ -51,6 +51,7 @@ def init_db():
                 referred_by INTEGER,
                 referral_count INTEGER DEFAULT 0,
                 free_case_available INTEGER DEFAULT 0,
+                free_case_last_used TIMESTAMP,
                 gift_items TEXT DEFAULT '[]',
                 withdrawn_items TEXT DEFAULT '[]',
                 pending_payment_id TEXT,
@@ -92,6 +93,17 @@ def init_db():
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 referrer_id INTEGER,
                 referred_id INTEGER,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE IF NOT EXISTS live_drops (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                username TEXT,
+                item_name TEXT,
+                item_icon TEXT,
+                case_name TEXT,
+                value_stars INTEGER DEFAULT 0,
+                value_ton REAL DEFAULT 0,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
         ''')
@@ -279,17 +291,12 @@ def handle_start(chat_id, user, args=None):
             my_ref = generate_ref_code(uid)
             referred_by = None
             
-            # Обработка реферального кода
             if ref_code:
-                # Ищем кто владелец этого кода
                 ref_row = conn.execute('SELECT user_id FROM users WHERE referral_code=?', (ref_code,)).fetchone()
                 if ref_row and ref_row[0] != uid:
                     referred_by = ref_row[0]
-                    # Увеличиваем счётчик рефералов у пригласившего
                     conn.execute('UPDATE users SET referral_count = referral_count + 1 WHERE user_id = ?', (referred_by,))
-                    # Сохраняем запись о реферале
                     conn.execute('INSERT INTO referrals (referrer_id, referred_id) VALUES (?, ?)', (referred_by, uid))
-                    # Проверяем не набрал ли 3 реферала
                     ref_count = conn.execute('SELECT referral_count FROM users WHERE user_id = ?', (referred_by,)).fetchone()
                     if ref_count and ref_count[0] >= 3:
                         conn.execute('UPDATE users SET free_case_available = 1 WHERE user_id = ?', (referred_by,))
@@ -307,7 +314,7 @@ def handle_start(chat_id, user, args=None):
         [{"text": "💼 ПРОФИЛЬ", "callback_data": "profile"}]
     ]}
     
-    tg_send(chat_id, "🎁 <b>GIFT CASES — КЕЙСЫ ПОДАРКОВ</b>\n\n📦 Обычный • ⭐ Звёздный\n💎 TON • 🐵 NFT\n🎁 Бесплатный (за 3 реферала)\n\n💰 Пополняйте через TON или Telegram Stars!\n🆕 Новые пользователи: баланс 0\n\n<b>👇 НАЖМИ НА КНОПКУ!</b>", keyboard)
+    tg_send(chat_id, "🎁 <b>GIFT CASES — КЕЙСЫ ПОДАРКОВ</b>\n\n📦 Обычный • ⭐ Звёздный\n💎 TON • 🐵 NFT\n🎁 Бесплатный (за 3 реферала, раз в 24ч)\n\n💰 Пополняйте через TON или Telegram Stars!\n🆕 Новые пользователи: баланс 0\n\n<b>👇 НАЖМИ НА КНОПКУ!</b>", keyboard)
 
 def handle_dep_ton(cb, chat_id, msg_id, uid):
     tg_answer(cb["id"])
@@ -443,18 +450,33 @@ def webapp():
 def api_user(uid):
     try:
         with db_connect() as conn:
-            row = conn.execute('SELECT balance_ton, balance_stars, gift_items, withdrawn_items, referral_count, free_case_available, language, total_deposited_ton, total_deposited_stars FROM users WHERE user_id=?', (uid,)).fetchone()
+            row = conn.execute('SELECT balance_ton, balance_stars, gift_items, withdrawn_items, referral_count, free_case_available, free_case_last_used, language, total_deposited_ton, total_deposited_stars FROM users WHERE user_id=?', (uid,)).fetchone()
         
         if row:
+            # Проверяем таймер бесплатного кейса
+            free_available = row[5] or 0
+            free_last = row[6]
+            free_timer = 0
+            
+            if free_available == 0 and free_last:
+                elapsed = (datetime.now() - datetime.fromisoformat(free_last)).total_seconds()
+                if elapsed < 86400:  # 24 часа
+                    free_timer = max(0, 86400 - int(elapsed))
+                else:
+                    # Прошло 24 часа - даём новый кейс
+                    conn.execute('UPDATE users SET free_case_available=1, free_case_last_used=NULL WHERE user_id=?', (uid,))
+                    free_available = 1
+                    free_timer = 0
+            
             return jsonify({
                 'balance_ton': row[0], 'balance_stars': row[1],
                 'gift_items': json.loads(row[2]) if row[2] else [],
                 'withdrawn_items': json.loads(row[3]) if row[3] else [],
-                'referral_count': row[4], 'free_case_available': row[5],
-                'language': row[6], 'deposited_ton': row[7], 'deposited_stars': row[8]
+                'referral_count': row[4], 'free_case_available': free_available,
+                'free_case_timer': free_timer,
+                'language': row[7], 'deposited_ton': row[8], 'deposited_stars': row[9]
             })
         else:
-            # Авто-регистрация
             ref_code = generate_ref_code(uid)
             conn.execute('INSERT INTO users (user_id, username, first_name, referral_code, balance_stars, balance_ton) VALUES (?, ?, ?, ?, 0, 0)', 
                         (uid, f"user_{uid}", "Player", ref_code))
@@ -464,6 +486,7 @@ def api_user(uid):
                 'balance_ton': 0, 'balance_stars': 0,
                 'gift_items': [], 'withdrawn_items': [],
                 'referral_count': 0, 'free_case_available': 0,
+                'free_case_timer': 0,
                 'language': 'ru', 'deposited_ton': 0, 'deposited_stars': 0
             })
     except Exception as e:
@@ -473,6 +496,7 @@ def api_user(uid):
         'balance_ton': 0, 'balance_stars': 0,
         'gift_items': [], 'withdrawn_items': [],
         'referral_count': 0, 'free_case_available': 0,
+        'free_case_timer': 0,
         'language': 'ru', 'deposited_ton': 0, 'deposited_stars': 0
     })
 
@@ -480,6 +504,25 @@ def api_user(uid):
 def api_cases():
     lang = request.args.get('lang', 'ru')
     return jsonify(get_cases_for_api(lang))
+
+@flask_app.route('/api/live_drops')
+def api_live_drops():
+    with db_connect() as conn:
+        rows = conn.execute('SELECT username, item_name, item_icon, case_name, value_stars, value_ton, created_at FROM live_drops ORDER BY created_at DESC LIMIT 20').fetchall()
+    
+    drops = []
+    for row in rows:
+        drops.append({
+            'username': row[0],
+            'item_name': row[1],
+            'item_icon': row[2],
+            'case_name': row[3],
+            'value_stars': row[4],
+            'value_ton': row[5],
+            'time': row[6]
+        })
+    
+    return jsonify(drops)
 
 @flask_app.route('/api/open_case', methods=['POST'])
 def api_open_case():
@@ -493,14 +536,16 @@ def api_open_case():
     case = CASES_DATA[case_id]
     
     with db_connect() as conn:
-        row = conn.execute('SELECT balance_ton, balance_stars, free_case_available, gift_items, language FROM users WHERE user_id=?', (uid,)).fetchone()
+        row = conn.execute('SELECT balance_ton, balance_stars, free_case_available, free_case_last_used, gift_items, language, username FROM users WHERE user_id=?', (uid,)).fetchone()
         if not row: return jsonify({'error': 'Пользователь не найден!'}), 404
-        ton_bal, stars_bal, free_avail, gifts_json, user_lang = row
+        ton_bal, stars_bal, free_avail, free_last, gifts_json, user_lang, username = row
         gifts = json.loads(gifts_json) if gifts_json else []
         
         if case_id == 'free':
-            if free_avail <= 0: return jsonify({'error': 'Нужно пригласить 3 друзей!'}), 400
-            conn.execute('UPDATE users SET free_case_available=0 WHERE user_id=?', (uid,))
+            if free_avail <= 0: return jsonify({'error': 'Бесплатный кейс недоступен! Пригласите 3 друзей или подождите 24 часа.'}), 400
+            # Используем бесплатный кейс и ставим таймер
+            conn.execute('UPDATE users SET free_case_available=0, free_case_last_used=? WHERE user_id=?', 
+                        (datetime.now().isoformat(), uid))
         elif not is_demo:
             if case.get('price_ton') and not case.get('price_stars'):
                 price = case['price_ton']
@@ -516,9 +561,10 @@ def api_open_case():
                 if currency == 'STARS' and stars_bal < price: return jsonify({'error': 'Недостаточно Stars!'}), 400
                 conn.execute(f'UPDATE users SET {"balance_ton" if currency=="TON" else "balance_stars"}={"balance_ton" if currency=="TON" else "balance_stars"}-? WHERE user_id=?', (price, uid))
         
+        # Для бесплатного кейса используем реальные шансы
         pool = []
         for item in case['items']:
-            chance = item['chance_demo'] if is_demo else item['chance_real']
+            chance = item['chance_demo'] if (is_demo or case_id == 'free') else item['chance_real']
             pool.extend([item] * int(chance * 10))
         
         winner = random.choice(pool) if pool else case['items'][-1]
@@ -527,11 +573,26 @@ def api_open_case():
         if not is_demo:
             gifts.append({'name': winner_name, 'icon': winner['icon'], 'value_stars': winner.get('value_stars', 0), 'value_ton': winner.get('value_ton', 0), 'timestamp': datetime.now().isoformat()})
             conn.execute('UPDATE users SET gift_items=? WHERE user_id=?', (json.dumps(gifts), uid))
+            
+            # Добавляем в Live Drops
+            conn.execute('INSERT INTO live_drops (user_id, username, item_name, item_icon, case_name, value_stars, value_ton) VALUES (?, ?, ?, ?, ?, ?, ?)',
+                        (uid, username or f"user_{uid}", winner_name, winner['icon'], case.get(f'name_{user_lang}', case.get('name_ru', '')), winner.get('value_stars', 0), winner.get('value_ton', 0)))
         
         new_ton = conn.execute('SELECT balance_ton FROM users WHERE user_id=?', (uid,)).fetchone()[0]
         new_stars = conn.execute('SELECT balance_stars FROM users WHERE user_id=?', (uid,)).fetchone()[0]
+        
+        # Получаем обновлённый таймер
+        free_timer = 0
+        if case_id == 'free':
+            free_timer = 86400  # 24 часа в секундах
     
-    return jsonify({'winner': {'name': winner_name, 'icon': winner['icon'], 'value_stars': winner.get('value_stars', 0), 'value_ton': winner.get('value_ton', 0)}, 'balance_ton': new_ton, 'balance_stars': new_stars, 'is_demo': is_demo})
+    return jsonify({
+        'winner': {'name': winner_name, 'icon': winner['icon'], 'value_stars': winner.get('value_stars', 0), 'value_ton': winner.get('value_ton', 0)}, 
+        'balance_ton': new_ton, 'balance_stars': new_stars, 
+        'is_demo': is_demo,
+        'free_case_available': 0 if case_id == 'free' else free_avail,
+        'free_case_timer': free_timer
+    })
 
 @flask_app.route('/api/sell_item', methods=['POST'])
 def api_sell_item():
@@ -608,7 +669,6 @@ def webhook():
                     
                     tg_send(msg["chat"]["id"], f"✅ <b>ПЛАТЕЖ ПОДТВЕРЖДЁН!</b>\n\n⭐ +{stars_amount} Stars зачислено!\n\n🎁 Открывайте кейсы!")
                     tg_send(ADMIN_ID, f"⭐ <b>ЗВЁЗДЫ ПОЛУЧЕНЫ!</b>\n\n👤 ID: <code>{uid}</code>\n⭐ Сумма: {stars_amount} Stars\n🔗 ID: <code>{charge_id}</code>")
-                    logger.info(f"⭐ Stars payment: {stars_amount} from {uid}")
                     
                     return "ok", 200
             
@@ -697,12 +757,27 @@ HTML_TEMPLATE = r'''<!DOCTYPE html>
         .deposit-btn-top.ton-btn{background:rgba(255,215,0,0.15);color:var(--gold);border:1px solid rgba(255,215,0,0.3)}
         .deposit-btn-top.stars-btn{background:rgba(96,165,250,0.15);color:#60a5fa;border:1px solid rgba(96,165,250,0.3)}
         .deposit-btn-top:active{transform:scale(0.95)}
+        
+        /* Live Drops */
+        .live-drops-section{padding:0 12px 8px}
+        .live-drops-title{font-weight:700;font-size:12px;color:var(--sub);text-transform:uppercase;letter-spacing:1px;margin-bottom:8px;display:flex;align-items:center;gap:6px}
+        .live-dots{width:8px;height:8px;border-radius:50%;background:#10B981;animation:pulse 2s infinite}
+        @keyframes pulse{0%,100%{opacity:1}50%{opacity:0.3}}
+        .live-drops-scroll{display:flex;gap:6px;overflow-x:auto;padding-bottom:4px}
+        .live-drop-item{flex-shrink:0;padding:8px 10px;background:var(--card);border-radius:10px;border:1px solid var(--border);font-size:11px;white-space:nowrap;display:flex;align-items:center;gap:6px}
+        .live-drop-icon{font-size:18px}
+        .live-drop-name{font-weight:600;color:var(--gold)}
+        .live-drop-case{font-size:9px;color:var(--sub)}
+        
         .cases-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;padding:12px}
         .case-card{padding:20px 14px;border-radius:20px;text-align:center;cursor:pointer;transition:all 0.3s;border:2px solid var(--border);position:relative;overflow:hidden;background:var(--card)}
         .case-card:active{transform:scale(0.95)}.case-card.featured{grid-column:1/-1;padding:24px}
+        .case-card.free-case{border-color:#10B981;background:rgba(16,185,129,0.05)}
+        .case-card.free-case.locked{opacity:0.5;pointer-events:none;border-color:#333}
         .case-icon{font-size:48px;margin-bottom:8px;position:relative;z-index:1}.case-card.featured .case-icon{font-size:60px}
         .case-name{font-weight:700;font-size:14px;margin-bottom:4px;position:relative;z-index:1}.case-card.featured .case-name{font-size:17px}
         .case-price{font-size:12px;font-weight:600;position:relative;z-index:1}
+        .case-timer{font-size:10px;color:#10B981;margin-top:2px;font-weight:600}
         .demo-toggle-inner{display:flex;align-items:center;justify-content:center;gap:10px;padding:10px 12px;margin:0 12px 12px;background:var(--card);border-radius:14px;border:1px solid var(--border)}
         .demo-label-inner{font-size:13px;font-weight:600;color:var(--sub)}
         .demo-switch-inner{position:relative;width:52px;height:28px;cursor:pointer}
@@ -718,6 +793,7 @@ HTML_TEMPLATE = r'''<!DOCTYPE html>
         .spin-btn{display:block;width:calc(100% - 24px);margin:0 12px 12px;padding:16px;border-radius:16px;font-weight:700;font-size:16px;border:none;cursor:pointer;text-transform:uppercase;letter-spacing:1px;transition:all 0.3s}
         .spin-btn:active{transform:scale(0.97)}.spin-btn.active{background:linear-gradient(135deg,var(--accent),#a855f7);color:#fff;box-shadow:0 0 30px rgba(124,58,237,0.4)}.spin-btn.disabled{background:#333;color:#666;cursor:not-allowed}
         .spin-btn.demo-btn{background:linear-gradient(135deg,#10B981,#34d399);color:#fff;box-shadow:0 0 20px rgba(16,185,129,0.3)}
+        .spin-btn.free-btn{background:linear-gradient(135deg,#10B981,#059669);color:#fff;box-shadow:0 0 20px rgba(16,185,129,0.3)}
         .spin-anim{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.95);z-index:200;flex-direction:column;align-items:center;justify-content:center}.spin-anim.active{display:flex}
         .roulette-window{width:92%;max-width:380px;height:110px;background:var(--card);border-radius:24px;overflow:hidden;position:relative;border:2px solid var(--border);margin-bottom:20px;box-shadow:0 20px 40px rgba(0,0,0,0.5)}
         .roulette-window::before,.roulette-window::after{content:'';position:absolute;left:0;width:100%;height:35px;z-index:2;pointer-events:none}
@@ -765,19 +841,27 @@ HTML_TEMPLATE = r'''<!DOCTYPE html>
         <button class="deposit-btn-top stars-btn" onclick="openDeposit('STARS')" id="btnDepStars">⭐ Пополнить Stars</button>
     </div>
 
+    <!-- Live Drops -->
+    <div class="live-drops-section">
+        <div class="live-drops-title"><div class="live-dots"></div> <span id="liveTitle">LIVE Дропы</span></div>
+        <div class="live-drops-scroll" id="liveDropsScroll">
+            <div class="live-drop-item"><span style="color:var(--sub)">Загрузка...</span></div>
+        </div>
+    </div>
+
     <div class="page active" id="page-cases"><div class="cases-grid" id="casesGrid"></div></div>
 
     <div class="page" id="page-case-detail">
         <div class="case-detail-header"><div class="case-detail-icon" id="detailIcon">📦</div><div class="case-detail-name" id="detailName">Обычный кейс</div><div class="case-detail-price" id="detailPrice">50 Stars</div></div>
-        <div class="demo-toggle-inner"><span class="demo-label-inner" id="demoLabel">Демо-режим</span><div class="demo-switch-inner" id="demoSwitchInner" onclick="toggleDemoInner()"><div class="demo-switch-track-inner"></div><div class="demo-switch-thumb-inner"></div></div></div>
+        <div class="demo-toggle-inner" id="demoToggleRow"><span class="demo-label-inner" id="demoLabel">Демо-режим</span><div class="demo-switch-inner" id="demoSwitchInner" onclick="toggleDemoInner()"><div class="demo-switch-track-inner"></div><div class="demo-switch-thumb-inner"></div></div></div>
         <div class="items-preview"><div class="items-preview-title" id="itemsTitle">Возможные призы</div><div class="items-grid" id="detailItems"></div></div>
         <button class="spin-btn active" id="detailSpinBtn" onclick="startSpin()">🎰 НАЧАТЬ КРУТИТЬ</button>
     </div>
 
     <div class="page" id="page-wins"><div id="winsList"></div></div>
     <div class="page" id="page-faq">
-        <div class="faq-item"><div class="faq-q" id="faqQ1">❓ Как пополнить Stars?</div><div class="faq-a" id="faqA1">Нажмите кнопку «Пополнить Stars», выберите сумму и оплатите счёт в чате с ботом. Звёзды спишутся реально!</div></div>
-        <div class="faq-item"><div class="faq-q" id="faqQ2">❓ Что такое демо-режим?</div><div class="faq-a" id="faqA2">Демо-режим внутри кейса позволяет крутить бесплатно, но без сохранения выигрышей.</div></div>
+        <div class="faq-item"><div class="faq-q" id="faqQ1">❓ Как пополнить Stars?</div><div class="faq-a" id="faqA1">Нажмите кнопку «Пополнить Stars», выберите сумму и оплатите счёт в чате с ботом.</div></div>
+        <div class="faq-item"><div class="faq-q" id="faqQ2">❓ Как получить бесплатный кейс?</div><div class="faq-a" id="faqA2">Пригласите 3 друзей — получите бесплатный кейс! Доступен раз в 24 часа.</div></div>
     </div>
     <div class="page" id="page-lang">
         <div style="text-align:center;padding:40px 20px"><div style="font-size:48px;margin-bottom:16px">🌐</div><div style="font-weight:700;font-size:18px;margin-bottom:20px" id="langTitle">Выберите язык</div>
@@ -795,6 +879,7 @@ HTML_TEMPLATE = r'''<!DOCTYPE html>
                 <div style="margin:12px 0;font-size:14px;color:var(--sub)" id="depTonLabel">📥 Пополнено TON: <b id="pDepTon">0</b></div>
                 <div style="margin:12px 0;font-size:14px;color:var(--sub)" id="depStarsLabel">📥 Пополнено Stars: <b id="pDepStars">0</b></div>
                 <div style="margin:12px 0;font-size:14px;color:var(--sub)" id="giftsLabel">🎁 Подарков: <b id="pGifts">0</b></div>
+                <div style="margin:12px 0;font-size:14px;color:var(--sub)">👥 Рефералов: <b id="pRef">0/3</b></div>
             </div>
         </div>
         <div class="tab-content" id="ptab-wins"><div id="profileWinsList"></div></div>
@@ -818,22 +903,28 @@ HTML_TEMPLATE = r'''<!DOCTYPE html>
 <script>
 const tg=window.Telegram.WebApp;tg.expand();tg.ready();
 const user=tg.initDataUnsafe?.user||{};const uname=user.first_name||'Player';const uid=user.id||123456789;
-let ton=0,stars=0,gifts=[],withdrawn=[],depTon=0,depStars=0,currentCase=null,isSpinning=false,demoModeInner=false,lang='ru';
+let ton=0,stars=0,gifts=[],withdrawn=[],depTon=0,depStars=0,currentCase=null,isSpinning=false,demoModeInner=false,lang='ru',refCount=0,freeAvail=0,freeTimer=0;
 document.getElementById('avatarSm').textContent=uname[0].toUpperCase();document.getElementById('profileAvatar').textContent=uname[0].toUpperCase();document.getElementById('profileName').textContent=uname;
 
-const TR={ru:{mainTitle:'🎁 Кейсы',depositTon:'💎 Пополнить TON',depositStars:'⭐ Пополнить Stars',demoLabel:'Демо-режим',itemsTitle:'Возможные призы',spin:'🎰 НАЧАТЬ КРУТИТЬ',spinDemo:'🆓 КРУТИТЬ ДЕМО',topUp:'💰 ПОПОЛНИТЕ БАЛАНС',noWins:'Нет выигрышей',sell:'💰 Продать',withdraw:'📤 Вывести',withdrawn:'✅ Выведено',history:'📤 История выводов',depTonL:'📥 Пополнено TON:',depStarsL:'📥 Пополнено Stars:',giftsL:'🎁 Подарков:',wins:'Выигрыши',profile:'Профиль',lang:'Язык',info:'📋 Инфо',faq:'❓ FAQ',chooseLang:'Выберите язык',spinning:'Крутим...',demSpinning:'Демо-режим...',faqQ1:'❓ Как пополнить Stars?',faqA1:'Нажмите кнопку «Пополнить Stars», выберите сумму и оплатите счёт в чате с ботом. Звёзды спишутся реально!',faqQ2:'❓ Что такое демо-режим?',faqA2:'Демо-режим внутри кейса позволяет крутить бесплатно.',faqSell:'В «Выигрыши» нажмите «Продать».',payTitleTon:'Пополнение TON',payTitleStars:'Пополнение Stars',sendTon:'Отправьте TON с кодом:',toWallet:'На кошелёк:',minTon:'⚠️ Мин: 1 TON | Без кода не зачислится!',starsInvoiceDesc:'Выберите сумму. Счёт придёт в чат с ботом. Звёзды спишутся реально!',close:'Закрыть',cases:'Кейсы',starsProcessing:'Создаём счёт...',starsSuccess:'✅ Счёт отправлен в бот! Проверьте чат.',starsError:'❌ Ошибка создания счёта'},en:{mainTitle:'🎁 Cases',depositTon:'💎 Deposit TON',depositStars:'⭐ Deposit Stars',demoLabel:'Demo Mode',itemsTitle:'Possible Prizes',spin:'🎰 START SPIN',spinDemo:'🆓 SPIN DEMO',topUp:'💰 TOP UP',noWins:'No wins',sell:'💰 Sell',withdraw:'📤 Withdraw',withdrawn:'✅ Withdrawn',history:'📤 History',depTonL:'📥 Deposited TON:',depStarsL:'📥 Deposited Stars:',giftsL:'🎁 Gifts:',wins:'Wins',profile:'Profile',lang:'Language',info:'📋 Info',faq:'❓ FAQ',chooseLang:'Choose Language',spinning:'Spinning...',demSpinning:'Demo Mode...',faqQ1:'❓ How to deposit Stars?',faqA1:'Press «Deposit Stars», choose amount and pay the invoice in the bot chat. Stars will be charged!',faqQ2:'❓ What is demo mode?',faqA2:'Demo mode allows free spins without saving wins.',faqSell:'In «Wins» press «Sell».',payTitleTon:'Deposit TON',payTitleStars:'Deposit Stars',sendTon:'Send TON with code:',toWallet:'To wallet:',minTon:'⚠️ Min: 1 TON | No code = no credit!',starsInvoiceDesc:'Choose amount. Invoice will arrive in bot chat. Stars will be charged!',close:'Close',cases:'Cases',starsProcessing:'Creating invoice...',starsSuccess:'✅ Invoice sent to bot! Check chat.',starsError:'❌ Error creating invoice'}};
+const TR={ru:{mainTitle:'🎁 Кейсы',depositTon:'💎 Пополнить TON',depositStars:'⭐ Пополнить Stars',demoLabel:'Демо-режим',itemsTitle:'Возможные призы',spin:'🎰 НАЧАТЬ КРУТИТЬ',spinDemo:'🆓 КРУТИТЬ ДЕМО',spinFree:'🎁 БЕСПЛАТНО',topUp:'💰 ПОПОЛНИТЕ БАЛАНС',noWins:'Нет выигрышей',sell:'💰 Продать',withdraw:'📤 Вывести',withdrawn:'✅ Выведено',history:'📤 История выводов',depTonL:'📥 Пополнено TON:',depStarsL:'📥 Пополнено Stars:',giftsL:'🎁 Подарков:',wins:'Выигрыши',profile:'Профиль',lang:'Язык',info:'📋 Инфо',faq:'❓ FAQ',chooseLang:'Выберите язык',spinning:'Крутим...',demSpinning:'Демо-режим...',liveTitle:'LIVE Дропы',freeLocked:'🔒 Пригласите 3 друзей',freeTimer:'🕐 Доступен через',close:'Закрыть',cases:'Кейсы',starsProcessing:'Создаём счёт...',starsSuccess:'✅ Счёт отправлен!',starsError:'❌ Ошибка'},en:{mainTitle:'🎁 Cases',depositTon:'💎 Deposit TON',depositStars:'⭐ Deposit Stars',demoLabel:'Demo Mode',itemsTitle:'Possible Prizes',spin:'🎰 START SPIN',spinDemo:'🆓 SPIN DEMO',spinFree:'🎁 FREE',topUp:'💰 TOP UP',noWins:'No wins',sell:'💰 Sell',withdraw:'📤 Withdraw',withdrawn:'✅ Withdrawn',history:'📤 History',depTonL:'📥 Deposited TON:',depStarsL:'📥 Deposited Stars:',giftsL:'🎁 Gifts:',wins:'Wins',profile:'Profile',lang:'Language',info:'📋 Info',faq:'❓ FAQ',chooseLang:'Choose Language',spinning:'Spinning...',demSpinning:'Demo Mode...',liveTitle:'LIVE Drops',freeLocked:'🔒 Invite 3 friends',freeTimer:'🕐 Available in',close:'Close',cases:'Cases',starsProcessing:'Creating invoice...',starsSuccess:'✅ Invoice sent!',starsError:'❌ Error'}};
 function t(key){return TR[lang]?.[key]||TR['ru'][key]||key}
 
-async function loadUser(){try{const r=await fetch('/api/user/'+uid);const d=await r.json();ton=d.balance_ton||0;stars=d.balance_stars||0;gifts=d.gift_items||[];withdrawn=d.withdrawn_items||[];depTon=d.deposited_ton||0;depStars=d.deposited_stars||0;lang=d.language||'ru';updateUI()}catch(e){updateUI()}}
+function formatTime(seconds){
+    if(seconds<=0)return'Доступен!';
+    const h=Math.floor(seconds/3600);const m=Math.floor((seconds%3600)/60);const s=seconds%60;
+    return `${h>0?h+'ч ':''}${m>0?m+'м ':''}${s}с`;
+}
+
+async function loadUser(){try{const r=await fetch('/api/user/'+uid);const d=await r.json();ton=d.balance_ton||0;stars=d.balance_stars||0;gifts=d.gift_items||[];withdrawn=d.withdrawn_items||[];depTon=d.deposited_ton||0;depStars=d.deposited_stars||0;lang=d.language||'ru';refCount=d.referral_count||0;freeAvail=d.free_case_available||0;freeTimer=d.free_case_timer||0;updateUI()}catch(e){updateUI()}}
 
 function updateUI(){
     document.getElementById('tonChip').textContent='💎 '+ton.toFixed(2)+' TON';
     document.getElementById('starsChip').textContent='⭐ '+stars+' Stars';
     document.getElementById('pTon').textContent=ton.toFixed(2);document.getElementById('pStars').textContent=stars;
     document.getElementById('pDepTon').textContent=depTon.toFixed(2)+' TON';document.getElementById('pDepStars').textContent=depStars+' Stars';
-    document.getElementById('pGifts').textContent=gifts.length;
+    document.getElementById('pGifts').textContent=gifts.length;document.getElementById('pRef').textContent=refCount+'/3';
     document.getElementById('depositRow').style.display=demoModeInner?'none':'flex';
-    applyAllTranslations();renderWins();loadCases();
+    applyAllTranslations();renderWins();loadCases();loadLiveDrops();
 }
 
 function applyAllTranslations(){
@@ -841,9 +932,7 @@ function applyAllTranslations(){
     document.getElementById('btnDepTon').textContent=t('depositTon');document.getElementById('btnDepStars').textContent=t('depositStars');
     document.getElementById('demoLabel').textContent=t('demoLabel');document.getElementById('itemsTitle').textContent=t('itemsTitle');
     document.getElementById('langTitle').textContent=t('chooseLang');
-    document.getElementById('faqQ1').textContent=t('faqQ1');document.getElementById('faqA1').textContent=t('faqA1');
-    document.getElementById('faqQ2').textContent=t('faqQ2');document.getElementById('faqA2').textContent=t('faqA2');
-    document.getElementById('faqSell').textContent=t('faqSell');
+    document.getElementById('liveTitle').textContent=t('liveTitle');
     document.getElementById('tabInfo').textContent=t('info');document.getElementById('tabWins').textContent=t('wins');
     document.getElementById('tabFaq').textContent=t('faq');document.getElementById('tabLang').textContent=t('lang');
     document.getElementById('navLabelCases').textContent=t('cases');document.getElementById('navLabelWins').textContent=t('wins');
@@ -853,9 +942,14 @@ function applyAllTranslations(){
 async function setLang(l){lang=l;try{await fetch('/api/language',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({user_id:uid,language:l})})}catch(e){}updateUI()}
 
 function toggleDemoInner(){demoModeInner=!demoModeInner;const sw=document.getElementById('demoSwitchInner');demoModeInner?sw.classList.add('active'):sw.classList.remove('active');updateUI();if(currentCase)updateCaseDetailButtons()}
-function updateCaseDetailButtons(){if(!currentCase)return;const can=demoModeInner||checkBalance();const btn=document.getElementById('detailSpinBtn');btn.className='spin-btn '+(can?'active':'disabled')+(demoModeInner?' demo-btn':'');btn.textContent=demoModeInner?t('spinDemo'):(can?t('spin'):t('topUp'));document.getElementById('detailPrice').textContent=demoModeInner?'🆓 '+t('demoLabel'):(currentCase.price_ton?currentCase.price_ton+' TON':(currentCase.price_stars?currentCase.price_stars+' Stars':'Бесплатно'))}
+function updateCaseDetailButtons(){if(!currentCase)return;const isFree=currentCase.id==='free';const can=isFree||demoModeInner||checkBalance();const btn=document.getElementById('detailSpinBtn');btn.className='spin-btn '+(can?'active':'disabled')+(demoModeInner?' demo-btn':(isFree?' free-btn':''));btn.textContent=isFree?t('spinFree'):(demoModeInner?t('spinDemo'):(can?t('spin'):t('topUp')));document.getElementById('detailPrice').textContent=isFree?'🎁 Бесплатно':(demoModeInner?'🆓 '+t('demoLabel'):(currentCase.price_ton?currentCase.price_ton+' TON':(currentCase.price_stars?currentCase.price_stars+' Stars':'Бесплатно')))
+    // Скрываем демо-переключатель для бесплатного кейса
+    document.getElementById('demoToggleRow').style.display=isFree?'none':'flex';
+}
 
-async function loadCases(){try{const r=await fetch('/api/cases?lang='+lang);const cases=await r.json();document.getElementById('casesGrid').innerHTML=cases.map(c=>{const price=c.price_ton?c.price_ton+' TON':(c.price_stars?c.price_stars+' Stars':'Бесплатно');const feat=c.id==='ton'?' featured':'';return `<div class="case-card${feat}" style="border-color:${c.color}" onclick="openCaseDetail('${c.id}')"><div class="case-icon">${c.icon}</div><div class="case-name">${c.name}</div><div class="case-price" style="color:${c.color}">${price}</div></div>`}).join('')}catch(e){}}
+async function loadLiveDrops(){try{const r=await fetch('/api/live_drops');const drops=await r.json();const scroll=document.getElementById('liveDropsScroll');if(drops.length===0){scroll.innerHTML='<div class="live-drop-item"><span style="color:var(--sub)">Пока нет дропов</span></div>'}else{scroll.innerHTML=drops.map(d=>`<div class="live-drop-item"><span class="live-drop-icon">${d.item_icon}</span><span class="live-drop-name">${d.item_name}</span><span class="live-drop-case">из ${d.case_name}</span></div>`).join('')}}catch(e){}}
+
+async function loadCases(){try{const r=await fetch('/api/cases?lang='+lang);const cases=await r.json();document.getElementById('casesGrid').innerHTML=cases.map(c=>{const isFree=c.id==='free';let price=c.price_ton?c.price_ton+' TON':(c.price_stars?c.price_stars+' Stars':'Бесплатно');let extra='';let cardClass='';if(isFree){if(freeAvail>0){price='🎁 Доступен!';cardClass=' free-case'}else if(freeTimer>0){price='🕐 '+formatTime(freeTimer);cardClass=' free-case locked'}else if(refCount<3){price=t('freeLocked');cardClass=' free-case locked'}else{price='🎁 Доступен!';cardClass=' free-case'}}const feat=c.id==='ton'?' featured':'';return `<div class="case-card${feat}${cardClass}" style="border-color:${c.color}" onclick="openCaseDetail('${c.id}')"><div class="case-icon">${c.icon}</div><div class="case-name">${c.name}</div><div class="case-price" style="color:${c.color}">${price}</div>${extra}</div>`}).join('')}catch(e){}}
 
 function openCaseDetail(caseId){
     fetch('/api/cases?lang='+lang).then(r=>r.json()).then(cases=>{
@@ -902,14 +996,20 @@ async function createStarsInvoice(amount){
 }
 
 function closePayment(){document.getElementById('paymentModal').classList.remove('active')}
-function checkBalance(){if(!currentCase)return false;if(currentCase.id==='free')return true;if(currentCase.price_ton&&ton>=currentCase.price_ton)return true;if(currentCase.price_stars&&stars>=currentCase.price_stars)return true;return false}
+function checkBalance(){if(!currentCase)return false;if(currentCase.id==='free')return freeAvail>0;if(currentCase.price_ton&&ton>=currentCase.price_ton)return true;if(currentCase.price_stars&&stars>=currentCase.price_stars)return true;return false}
 
 async function startSpin(){
-    if(!currentCase||isSpinning)return;if(!demoModeInner&&!checkBalance()){alert(t('topUp'));return}
+    if(!currentCase||isSpinning)return;
+    const isFree=currentCase.id==='free';
+    if(!isFree&&!demoModeInner&&!checkBalance()){alert(t('topUp'));return}
+    if(isFree&&freeAvail<=0){alert('Бесплатный кейс недоступен!');return}
+    
     const currency=currentCase.price_ton?'TON':'STARS';
     const r=await fetch('/api/open_case',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({user_id:uid,case_id:currentCase.id,currency,demo_mode:demoModeInner})});
     const d=await r.json();if(d.error){alert(d.error);return}
-    ton=d.balance_ton;stars=d.balance_stars;const winner=d.winner;
+    ton=d.balance_ton;stars=d.balance_stars;
+    if(isFree){freeAvail=d.free_case_available;freeTimer=d.free_case_timer}
+    const winner=d.winner;
     const trackItems=[];for(let i=0;i<40;i++)trackItems.push(...currentCase.items);
     const wis=[];trackItems.forEach((item,i)=>{if(item.icon===winner.icon&&item.name===winner.name)wis.push(i)});
     const rs=Math.floor(trackItems.length*0.55),re=Math.floor(trackItems.length*0.75);
@@ -918,11 +1018,11 @@ async function startSpin(){
     const IW=88,ww=document.getElementById('rouletteWindow').offsetWidth,tp=-(ci*IW)+(ww/2)-(IW/2);
     track.style.transition='none';track.style.transform='translateX(0)';
     document.getElementById('spinAnim').classList.add('active');
-    document.getElementById('spinText').textContent=demoModeInner?t('demSpinning'):t('spinning');
+    document.getElementById('spinText').textContent=isFree?'Бесплатный кейс...':(demoModeInner?t('demSpinning'):t('spinning'));
     document.getElementById('spinText').classList.remove('win');isSpinning=true;
     requestAnimationFrame(()=>{requestAnimationFrame(()=>{track.style.transition='transform 6s cubic-bezier(0.05,0.95,0.1,1)';track.style.transform=`translateX(${tp}px)`})});
-    setTimeout(()=>{document.querySelectorAll('.roulette-item').forEach(el=>el.classList.remove('highlight'));const wel=document.getElementById('ri'+ci);if(wel)wel.classList.add('highlight');document.getElementById('spinText').textContent=(demoModeInner?'[DEMO] ':'')+'🎉 '+winner.name+'!';document.getElementById('spinText').classList.add('win')},5500);
-    setTimeout(()=>{document.getElementById('spinAnim').classList.remove('active');isSpinning=false;if(!demoModeInner){gifts.push({name:winner.name,icon:winner.icon,value_stars:winner.value_stars||0,value_ton:winner.value_ton||0})}document.getElementById('toastIcon').textContent=winner.icon;document.getElementById('toastName').textContent=(demoModeInner?'[DEMO] ':'')+winner.name;document.getElementById('resultToast').style.display='flex';setTimeout(()=>document.getElementById('resultToast').style.display='none',3000);updateUI();goBack()},6300);
+    setTimeout(()=>{document.querySelectorAll('.roulette-item').forEach(el=>el.classList.remove('highlight'));const wel=document.getElementById('ri'+ci);if(wel)wel.classList.add('highlight');document.getElementById('spinText').textContent=(isFree?'[БЕСПЛАТНО] ':(demoModeInner?'[DEMO] ':''))+'🎉 '+winner.name+'!';document.getElementById('spinText').classList.add('win')},5500);
+    setTimeout(()=>{document.getElementById('spinAnim').classList.remove('active');isSpinning=false;if(!isFree&&!demoModeInner){gifts.push({name:winner.name,icon:winner.icon,value_stars:winner.value_stars||0,value_ton:winner.value_ton||0})}document.getElementById('toastIcon').textContent=winner.icon;document.getElementById('toastName').textContent=(isFree?'[БЕСПЛАТНО] ':(demoModeInner?'[DEMO] ':''))+winner.name;document.getElementById('resultToast').style.display='flex';setTimeout(()=>document.getElementById('resultToast').style.display='none',3000);updateUI();goBack()},6300);
 }
 
 function goBack(){showPage('cases');document.getElementById('topbarMain').style.display='flex';document.getElementById('topbarCase').style.display='none';currentCase=null;demoModeInner=false;document.getElementById('demoSwitchInner').classList.remove('active');updateUI()}
@@ -932,6 +1032,11 @@ async function withdrawItem(i){const w=prompt('TON wallet:');if(!w)return;const 
 function showPage(p){document.querySelectorAll('.page').forEach(pg=>pg.classList.remove('active'));const el=document.getElementById('page-'+p);if(el)el.classList.add('active')}
 function navigate(p){if(isSpinning)return;showPage(p);document.getElementById('topbarMain').style.display='flex';document.getElementById('topbarCase').style.display='none';currentCase=null;demoModeInner=false;document.getElementById('demoSwitchInner').classList.remove('active');updateUI();document.querySelectorAll('.nav-btn').forEach(b=>b.classList.remove('active'));const navMap={cases:'navCases',wins:'navWins',faq:'navFaq',lang:'navLang',profile:'navProfile'};const an=document.getElementById(navMap[p]);if(an)an.classList.add('active');document.getElementById('mainTitle').textContent=t(p==='cases'?'mainTitle':p==='wins'?'wins':p==='faq'?'faq':p==='lang'?'chooseLang':'profile')}
 function profileTab(t){document.querySelectorAll('#page-profile .tab-btn').forEach(b=>b.classList.remove('active'));document.querySelectorAll('#page-profile .tab-content').forEach(c=>c.classList.remove('active'));event.target.classList.add('active');const el=document.getElementById('ptab-'+t);if(el)el.classList.add('active')}
+
+// Обновление таймера каждую секунду
+setInterval(async()=>{if(freeTimer>0){freeTimer--;if(freeTimer<=0){freeAvail=1;freeTimer=0}updateUI()}},1000);
+setInterval(loadLiveDrops,5000); // Обновление Live Drops каждые 5 секунд
+
 loadUser();
 </script>
 </body>

@@ -529,7 +529,6 @@ def api_open_case():
         
         if case_id == 'free':
             if free_avail <= 0: return jsonify({'error': 'Нужно пригласить 3 друзей!'}), 400
-            # Используем кейс и сбрасываем счётчик рефералов
             conn.execute('UPDATE users SET free_case_available=0, referral_count=0 WHERE user_id=?', (uid,))
         elif not is_demo:
             if case.get('price_ton') and not case.get('price_stars'):
@@ -705,7 +704,7 @@ def webhook():
 def health(): return jsonify({"status": "ok"})
 
 # =================================================================
-# HTML ШАБЛОН
+# HTML ШАБЛОН (ФИНАЛЬНАЯ ВЕРСИЯ С АВАТАРКАМИ)
 # =================================================================
 HTML_TEMPLATE = r'''<!DOCTYPE html>
 <html lang="ru">
@@ -726,7 +725,7 @@ HTML_TEMPLATE = r'''<!DOCTYPE html>
         .topbar{display:flex;align-items:center;justify-content:space-between;padding:10px 16px;background:var(--card);border-bottom:1px solid var(--border);position:sticky;top:0;z-index:50}
         .topbar-title{font-weight:700;font-size:16px}
         .back-btn{width:36px;height:36px;border-radius:50%;background:rgba(255,255,255,0.05);border:none;color:#fff;font-size:18px;cursor:pointer;display:flex;align-items:center;justify-content:center}
-        .avatar-sm{width:36px;height:36px;border-radius:50%;background:linear-gradient(135deg,var(--accent),#a855f7);display:flex;align-items:center;justify-content:center;font-weight:700;font-size:16px;cursor:pointer}
+        .avatar-sm{width:36px;height:36px;border-radius:50%;background:linear-gradient(135deg,var(--accent),#a855f7);display:flex;align-items:center;justify-content:center;font-weight:700;font-size:16px;cursor:pointer;background-size:cover;background-position:center;flex-shrink:0}
         .bal-row{display:flex;gap:8px;padding:8px 12px;overflow-x:auto}
         .bal-chip{flex-shrink:0;padding:6px 12px;border-radius:20px;background:var(--card);font-size:12px;font-weight:600;white-space:nowrap;border:1px solid var(--border)}
         .bal-chip.ton{color:var(--gold)}.bal-chip.stars{color:#60a5fa}
@@ -784,7 +783,8 @@ HTML_TEMPLATE = r'''<!DOCTYPE html>
         .spin-text{font-size:18px;color:var(--sub);font-weight:600;transition:all 0.3s}.spin-text.win{color:var(--gold);font-size:22px;font-weight:800}
         .result-toast{position:fixed;top:16px;left:50%;transform:translateX(-50%);padding:14px 20px;background:var(--card);border-radius:14px;z-index:300;text-align:center;font-weight:600;font-size:13px;border:1px solid var(--gold);animation:slideDown 0.4s ease;cursor:pointer;box-shadow:0 10px 30px rgba(0,0,0,0.5);display:flex;align-items:center;gap:10px}
         @keyframes slideDown{from{transform:translate(-50%,-100%);opacity:0}to{transform:translate(-50%,0);opacity:1}}
-        .profile-header{text-align:center;padding:20px}.profile-avatar{width:64px;height:64px;border-radius:50%;background:linear-gradient(135deg,var(--accent),#a855f7);display:flex;align-items:center;justify-content:center;font-size:28px;font-weight:700;margin:0 auto 8px}
+        .profile-header{text-align:center;padding:20px}
+        .profile-avatar{width:64px;height:64px;border-radius:50%;background:linear-gradient(135deg,var(--accent),#a855f7);display:flex;align-items:center;justify-content:center;font-size:28px;font-weight:700;margin:0 auto 8px;background-size:cover;background-position:center}
         .tab-row{display:flex;gap:2px;padding:4px;background:var(--card);border-radius:12px;margin:0 12px 12px;overflow-x:auto}
         .tab-btn{flex:1;min-width:fit-content;padding:10px 8px;text-align:center;border-radius:10px;cursor:pointer;font-weight:600;font-size:11px;color:var(--sub);border:none;background:transparent;transition:all 0.3s;white-space:nowrap}.tab-btn.active{background:var(--accent);color:#fff}
         .tab-content{display:none;padding:12px}.tab-content.active{display:block}
@@ -877,14 +877,36 @@ HTML_TEMPLATE = r'''<!DOCTYPE html>
 
 <script>
 const tg=window.Telegram.WebApp;tg.expand();tg.ready();
-const user=tg.initDataUnsafe?.user||{};const uname=user.first_name||'Player';const uid=user.id||123456789;
-let ton=0,stars=0,gifts=[],withdrawn=[],depTon=0,depStars=0,currentCase=null,isSpinning=false,demoModeInner=false,lang='ru',refCount=0,freeAvail=0,freeTimer=0;
-document.getElementById('avatarSm').textContent=uname[0].toUpperCase();document.getElementById('profileAvatar').textContent=uname[0].toUpperCase();document.getElementById('profileName').textContent=uname;
+const user=tg.initDataUnsafe?.user||{};
+const uname=user.first_name||'Player';
+const uid=user.id||123456789;
 
+// Переменные состояния
+let ton=0,stars=0,gifts=[],withdrawn=[],depTon=0,depStars=0,currentCase=null,isSpinning=false,demoModeInner=false,lang='ru',refCount=0,freeAvail=0;
+
+// Аватарки
+const avatarSm=document.getElementById('avatarSm');
+const profileAvatar=document.getElementById('profileAvatar');
+document.getElementById('profileName').textContent=uname;
+
+if(user.photo_url){
+    avatarSm.style.backgroundImage=`url(${user.photo_url})`;
+    avatarSm.textContent='';
+    profileAvatar.style.backgroundImage=`url(${user.photo_url})`;
+    profileAvatar.textContent='';
+}else{
+    avatarSm.textContent=uname[0].toUpperCase();
+    profileAvatar.textContent=uname[0].toUpperCase();
+}
+
+// Клик по аватарке -> профиль
+avatarSm.addEventListener('click',()=>navigate('profile'));
+
+// Переводы
 const TR={ru:{mainTitle:'🎁 Кейсы',depositTon:'💎 Пополнить TON',depositStars:'⭐ Пополнить Stars',demoLabel:'Демо-режим',itemsTitle:'Возможные призы',spin:'🎰 НАЧАТЬ КРУТИТЬ',spinDemo:'🆓 КРУТИТЬ ДЕМО',spinFree:'🎁 БЕСПЛАТНО',topUp:'💰 ПОПОЛНИТЕ БАЛАНС',noWins:'Нет выигрышей',sell:'💰 Продать',withdraw:'📤 Вывести',withdrawn:'✅ Выведено',history:'📤 История выводов',depTonL:'📥 Пополнено TON:',depStarsL:'📥 Пополнено Stars:',giftsL:'🎁 Подарков:',wins:'Выигрыши',profile:'Профиль',lang:'Язык',info:'📋 Инфо',faq:'❓ FAQ',chooseLang:'Выберите язык',spinning:'Крутим...',demSpinning:'Демо-режим...',liveTitle:'LIVE Дропы',freeLocked:'🔒 Пригласите 3 друзей',close:'Закрыть',cases:'Кейсы',starsProcessing:'Создаём счёт...',starsSuccess:'✅ Счёт отправлен!',starsError:'❌ Ошибка',payTitleTon:'Пополнение TON',payTitleStars:'Пополнение Stars',sendTon:'Отправьте TON с кодом:',toWallet:'На кошелёк:',minTon:'⚠️ Мин: 1 TON | Без кода не зачислится!',starsInvoiceDesc:'Выберите сумму. Счёт придёт в чат с ботом. Звёзды спишутся реально!'},en:{mainTitle:'🎁 Cases',depositTon:'💎 Deposit TON',depositStars:'⭐ Deposit Stars',demoLabel:'Demo Mode',itemsTitle:'Possible Prizes',spin:'🎰 START SPIN',spinDemo:'🆓 SPIN DEMO',spinFree:'🎁 FREE',topUp:'💰 TOP UP',noWins:'No wins',sell:'💰 Sell',withdraw:'📤 Withdraw',withdrawn:'✅ Withdrawn',history:'📤 History',depTonL:'📥 Deposited TON:',depStarsL:'📥 Deposited Stars:',giftsL:'🎁 Gifts:',wins:'Wins',profile:'Profile',lang:'Language',info:'📋 Info',faq:'❓ FAQ',chooseLang:'Choose Language',spinning:'Spinning...',demSpinning:'Demo Mode...',liveTitle:'LIVE Drops',freeLocked:'🔒 Invite 3 friends',close:'Close',cases:'Cases',starsProcessing:'Creating invoice...',starsSuccess:'✅ Invoice sent!',starsError:'❌ Error',payTitleTon:'Deposit TON',payTitleStars:'Deposit Stars',sendTon:'Send TON with code:',toWallet:'To wallet:',minTon:'⚠️ Min: 1 TON | No code = no credit!',starsInvoiceDesc:'Choose amount. Invoice will arrive in bot chat. Stars will be charged!'}};
 function t(key){return TR[lang]?.[key]||TR['ru'][key]||key}
 
-async function loadUser(){try{const r=await fetch('/api/user/'+uid);const d=await r.json();ton=d.balance_ton||0;stars=d.balance_stars||0;gifts=d.gift_items||[];withdrawn=d.withdrawn_items||[];depTon=d.deposited_ton||0;depStars=d.deposited_stars||0;lang=d.language||'ru';refCount=d.referral_count||0;freeAvail=d.free_case_available||0;freeTimer=d.free_case_timer||0;updateUI()}catch(e){updateUI()}}
+async function loadUser(){try{const r=await fetch('/api/user/'+uid);const d=await r.json();ton=d.balance_ton||0;stars=d.balance_stars||0;gifts=d.gift_items||[];withdrawn=d.withdrawn_items||[];depTon=d.deposited_ton||0;depStars=d.deposited_stars||0;lang=d.language||'ru';refCount=d.referral_count||0;freeAvail=d.free_case_available||0;updateUI()}catch(e){updateUI()}}
 
 function updateUI(){
     document.getElementById('tonChip').textContent='💎 '+ton.toFixed(2)+' TON';
@@ -976,7 +998,7 @@ async function startSpin(){
     const r=await fetch('/api/open_case',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({user_id:uid,case_id:currentCase.id,currency,demo_mode:demoModeInner})});
     const d=await r.json();if(d.error){alert(d.error);return}
     ton=d.balance_ton;stars=d.balance_stars;
-    if(isFree){freeAvail=d.free_case_available;refCount=0} // Сбрасываем счётчик рефералов
+    if(isFree){freeAvail=d.free_case_available;refCount=0}
     const winner=d.winner;
     const trackItems=[];for(let i=0;i<40;i++)trackItems.push(...currentCase.items);
     const wis=[];trackItems.forEach((item,i)=>{if(item.icon===winner.icon&&item.name===winner.name)wis.push(i)});
@@ -1002,7 +1024,6 @@ function navigate(p){if(isSpinning)return;showPage(p);document.getElementById('t
 function profileTab(t){document.querySelectorAll('#page-profile .tab-btn').forEach(b=>b.classList.remove('active'));document.querySelectorAll('#page-profile .tab-content').forEach(c=>c.classList.remove('active'));event.target.classList.add('active');const el=document.getElementById('ptab-'+t);if(el)el.classList.add('active')}
 
 setInterval(loadLiveDrops,5000);
-
 loadUser();
 </script>
 </body>

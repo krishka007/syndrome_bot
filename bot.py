@@ -185,7 +185,7 @@ def generate_payment_id(user_id):
     return hashlib.sha256(f"pay{user_id}{time.time()}{random.randint(0,9999)}".encode()).hexdigest()[:16].upper()
 
 # =================================================================
-# ДАННЫЕ КЕЙСОВ
+# ДАННЫЕ КЕЙСОВ (С НОВЫМИ NFT)
 # =================================================================
 CASES_DATA = {
     "regular": {
@@ -233,6 +233,10 @@ CASES_DATA = {
             {"name_ru": "🐍 NFT Змейка", "name_en": "🐍 NFT Snake", "icon": "🐍", "chance_demo": 35, "chance_real": 5, "value_stars": 250, "value_ton": 8},
             {"name_ru": "🎄 NFT Новый Год", "name_en": "🎄 NFT New Year", "icon": "🎄", "chance_demo": 45, "chance_real": 8, "value_stars": 150, "value_ton": 5},
             {"name_ru": "🎃 NFT Хэллоуин", "name_en": "🎃 NFT Halloween", "icon": "🎃", "chance_demo": 12, "chance_real": 3, "value_stars": 400, "value_ton": 15},
+            {"name_ru": "🍦 NFT Мороженое", "name_en": "🍦 NFT Ice Cream", "icon": "🍦", "chance_demo": 13, "chance_real": 2, "value_stars": 300, "value_ton": 10},
+            {"name_ru": "🎒 NFT Рюкзак", "name_en": "🎒 NFT Backpack", "icon": "🎒", "chance_demo": 5, "chance_real": 0.5, "value_stars": 800, "value_ton": 25},
+            {"name_ru": "🍁 NFT Swag Bag", "name_en": "🍁 NFT Swag Bag", "icon": "🍁", "chance_demo": 20, "chance_real": 3, "value_stars": 200, "value_ton": 7},
+            {"name_ru": "🐶 NFT Snoop Dogg", "name_en": "🐶 NFT Snoop Dogg", "icon": "🐶", "chance_demo": 7, "chance_real": 1, "value_stars": 600, "value_ton": 20},
         ]
     },
     "free": {
@@ -300,11 +304,9 @@ def handle_start(chat_id, user, args=None):
                     ref_count = conn.execute('SELECT referral_count FROM users WHERE user_id = ?', (referred_by,)).fetchone()
                     if ref_count and ref_count[0] >= 3:
                         conn.execute('UPDATE users SET free_case_available = 1 WHERE user_id = ?', (referred_by,))
-                        logger.info(f"🎁 Пользователь {referred_by} получил бесплатный кейс! Рефералов: {ref_count[0]}")
             
             conn.execute('INSERT INTO users (user_id, username, first_name, referral_code, referred_by, balance_stars, balance_ton) VALUES (?, ?, ?, ?, ?, 0, 0)', 
                         (uid, uname, fname, my_ref, referred_by))
-            logger.info(f"🆕 Новый пользователь: {uid}, пригласил: {referred_by}")
     
     keyboard = {"inline_keyboard": [
         [{"text": "🎁 ОТКРЫТЬ ПРИЛОЖЕНИЕ", "web_app": {"url": WEBAPP_URL}}],
@@ -453,17 +455,15 @@ def api_user(uid):
             row = conn.execute('SELECT balance_ton, balance_stars, gift_items, withdrawn_items, referral_count, free_case_available, free_case_last_used, language, total_deposited_ton, total_deposited_stars FROM users WHERE user_id=?', (uid,)).fetchone()
         
         if row:
-            # Проверяем таймер бесплатного кейса
             free_available = row[5] or 0
             free_last = row[6]
             free_timer = 0
             
             if free_available == 0 and free_last:
                 elapsed = (datetime.now() - datetime.fromisoformat(free_last)).total_seconds()
-                if elapsed < 86400:  # 24 часа
+                if elapsed < 86400:
                     free_timer = max(0, 86400 - int(elapsed))
                 else:
-                    # Прошло 24 часа - даём новый кейс
                     conn.execute('UPDATE users SET free_case_available=1, free_case_last_used=NULL WHERE user_id=?', (uid,))
                     free_available = 1
                     free_timer = 0
@@ -543,7 +543,6 @@ def api_open_case():
         
         if case_id == 'free':
             if free_avail <= 0: return jsonify({'error': 'Бесплатный кейс недоступен! Пригласите 3 друзей или подождите 24 часа.'}), 400
-            # Используем бесплатный кейс и ставим таймер
             conn.execute('UPDATE users SET free_case_available=0, free_case_last_used=? WHERE user_id=?', 
                         (datetime.now().isoformat(), uid))
         elif not is_demo:
@@ -561,7 +560,6 @@ def api_open_case():
                 if currency == 'STARS' and stars_bal < price: return jsonify({'error': 'Недостаточно Stars!'}), 400
                 conn.execute(f'UPDATE users SET {"balance_ton" if currency=="TON" else "balance_stars"}={"balance_ton" if currency=="TON" else "balance_stars"}-? WHERE user_id=?', (price, uid))
         
-        # Для бесплатного кейса используем реальные шансы
         pool = []
         for item in case['items']:
             chance = item['chance_demo'] if (is_demo or case_id == 'free') else item['chance_real']
@@ -574,17 +572,15 @@ def api_open_case():
             gifts.append({'name': winner_name, 'icon': winner['icon'], 'value_stars': winner.get('value_stars', 0), 'value_ton': winner.get('value_ton', 0), 'timestamp': datetime.now().isoformat()})
             conn.execute('UPDATE users SET gift_items=? WHERE user_id=?', (json.dumps(gifts), uid))
             
-            # Добавляем в Live Drops
             conn.execute('INSERT INTO live_drops (user_id, username, item_name, item_icon, case_name, value_stars, value_ton) VALUES (?, ?, ?, ?, ?, ?, ?)',
                         (uid, username or f"user_{uid}", winner_name, winner['icon'], case.get(f'name_{user_lang}', case.get('name_ru', '')), winner.get('value_stars', 0), winner.get('value_ton', 0)))
         
         new_ton = conn.execute('SELECT balance_ton FROM users WHERE user_id=?', (uid,)).fetchone()[0]
         new_stars = conn.execute('SELECT balance_stars FROM users WHERE user_id=?', (uid,)).fetchone()[0]
         
-        # Получаем обновлённый таймер
         free_timer = 0
         if case_id == 'free':
-            free_timer = 86400  # 24 часа в секундах
+            free_timer = 86400
     
     return jsonify({
         'winner': {'name': winner_name, 'icon': winner['icon'], 'value_stars': winner.get('value_stars', 0), 'value_ton': winner.get('value_ton', 0)}, 
@@ -758,7 +754,6 @@ HTML_TEMPLATE = r'''<!DOCTYPE html>
         .deposit-btn-top.stars-btn{background:rgba(96,165,250,0.15);color:#60a5fa;border:1px solid rgba(96,165,250,0.3)}
         .deposit-btn-top:active{transform:scale(0.95)}
         
-        /* Live Drops */
         .live-drops-section{padding:0 12px 8px}
         .live-drops-title{font-weight:700;font-size:12px;color:var(--sub);text-transform:uppercase;letter-spacing:1px;margin-bottom:8px;display:flex;align-items:center;gap:6px}
         .live-dots{width:8px;height:8px;border-radius:50%;background:#10B981;animation:pulse 2s infinite}
@@ -841,7 +836,6 @@ HTML_TEMPLATE = r'''<!DOCTYPE html>
         <button class="deposit-btn-top stars-btn" onclick="openDeposit('STARS')" id="btnDepStars">⭐ Пополнить Stars</button>
     </div>
 
-    <!-- Live Drops -->
     <div class="live-drops-section">
         <div class="live-drops-title"><div class="live-dots"></div> <span id="liveTitle">LIVE Дропы</span></div>
         <div class="live-drops-scroll" id="liveDropsScroll">
@@ -906,7 +900,7 @@ const user=tg.initDataUnsafe?.user||{};const uname=user.first_name||'Player';con
 let ton=0,stars=0,gifts=[],withdrawn=[],depTon=0,depStars=0,currentCase=null,isSpinning=false,demoModeInner=false,lang='ru',refCount=0,freeAvail=0,freeTimer=0;
 document.getElementById('avatarSm').textContent=uname[0].toUpperCase();document.getElementById('profileAvatar').textContent=uname[0].toUpperCase();document.getElementById('profileName').textContent=uname;
 
-const TR={ru:{mainTitle:'🎁 Кейсы',depositTon:'💎 Пополнить TON',depositStars:'⭐ Пополнить Stars',demoLabel:'Демо-режим',itemsTitle:'Возможные призы',spin:'🎰 НАЧАТЬ КРУТИТЬ',spinDemo:'🆓 КРУТИТЬ ДЕМО',spinFree:'🎁 БЕСПЛАТНО',topUp:'💰 ПОПОЛНИТЕ БАЛАНС',noWins:'Нет выигрышей',sell:'💰 Продать',withdraw:'📤 Вывести',withdrawn:'✅ Выведено',history:'📤 История выводов',depTonL:'📥 Пополнено TON:',depStarsL:'📥 Пополнено Stars:',giftsL:'🎁 Подарков:',wins:'Выигрыши',profile:'Профиль',lang:'Язык',info:'📋 Инфо',faq:'❓ FAQ',chooseLang:'Выберите язык',spinning:'Крутим...',demSpinning:'Демо-режим...',liveTitle:'LIVE Дропы',freeLocked:'🔒 Пригласите 3 друзей',freeTimer:'🕐 Доступен через',close:'Закрыть',cases:'Кейсы',starsProcessing:'Создаём счёт...',starsSuccess:'✅ Счёт отправлен!',starsError:'❌ Ошибка'},en:{mainTitle:'🎁 Cases',depositTon:'💎 Deposit TON',depositStars:'⭐ Deposit Stars',demoLabel:'Demo Mode',itemsTitle:'Possible Prizes',spin:'🎰 START SPIN',spinDemo:'🆓 SPIN DEMO',spinFree:'🎁 FREE',topUp:'💰 TOP UP',noWins:'No wins',sell:'💰 Sell',withdraw:'📤 Withdraw',withdrawn:'✅ Withdrawn',history:'📤 History',depTonL:'📥 Deposited TON:',depStarsL:'📥 Deposited Stars:',giftsL:'🎁 Gifts:',wins:'Wins',profile:'Profile',lang:'Language',info:'📋 Info',faq:'❓ FAQ',chooseLang:'Choose Language',spinning:'Spinning...',demSpinning:'Demo Mode...',liveTitle:'LIVE Drops',freeLocked:'🔒 Invite 3 friends',freeTimer:'🕐 Available in',close:'Close',cases:'Cases',starsProcessing:'Creating invoice...',starsSuccess:'✅ Invoice sent!',starsError:'❌ Error'}};
+const TR={ru:{mainTitle:'🎁 Кейсы',depositTon:'💎 Пополнить TON',depositStars:'⭐ Пополнить Stars',demoLabel:'Демо-режим',itemsTitle:'Возможные призы',spin:'🎰 НАЧАТЬ КРУТИТЬ',spinDemo:'🆓 КРУТИТЬ ДЕМО',spinFree:'🎁 БЕСПЛАТНО',topUp:'💰 ПОПОЛНИТЕ БАЛАНС',noWins:'Нет выигрышей',sell:'💰 Продать',withdraw:'📤 Вывести',withdrawn:'✅ Выведено',history:'📤 История выводов',depTonL:'📥 Пополнено TON:',depStarsL:'📥 Пополнено Stars:',giftsL:'🎁 Подарков:',wins:'Выигрыши',profile:'Профиль',lang:'Язык',info:'📋 Инфо',faq:'❓ FAQ',chooseLang:'Выберите язык',spinning:'Крутим...',demSpinning:'Демо-режим...',liveTitle:'LIVE Дропы',freeLocked:'🔒 Пригласите 3 друзей',freeTimer:'🕐 Доступен через',close:'Закрыть',cases:'Кейсы',starsProcessing:'Создаём счёт...',starsSuccess:'✅ Счёт отправлен!',starsError:'❌ Ошибка',payTitleTon:'Пополнение TON',payTitleStars:'Пополнение Stars',sendTon:'Отправьте TON с кодом:',toWallet:'На кошелёк:',minTon:'⚠️ Мин: 1 TON | Без кода не зачислится!',starsInvoiceDesc:'Выберите сумму. Счёт придёт в чат с ботом. Звёзды спишутся реально!'},en:{mainTitle:'🎁 Cases',depositTon:'💎 Deposit TON',depositStars:'⭐ Deposit Stars',demoLabel:'Demo Mode',itemsTitle:'Possible Prizes',spin:'🎰 START SPIN',spinDemo:'🆓 SPIN DEMO',spinFree:'🎁 FREE',topUp:'💰 TOP UP',noWins:'No wins',sell:'💰 Sell',withdraw:'📤 Withdraw',withdrawn:'✅ Withdrawn',history:'📤 History',depTonL:'📥 Deposited TON:',depStarsL:'📥 Deposited Stars:',giftsL:'🎁 Gifts:',wins:'Wins',profile:'Profile',lang:'Language',info:'📋 Info',faq:'❓ FAQ',chooseLang:'Choose Language',spinning:'Spinning...',demSpinning:'Demo Mode...',liveTitle:'LIVE Drops',freeLocked:'🔒 Invite 3 friends',freeTimer:'🕐 Available in',close:'Close',cases:'Cases',starsProcessing:'Creating invoice...',starsSuccess:'✅ Invoice sent!',starsError:'❌ Error',payTitleTon:'Deposit TON',payTitleStars:'Deposit Stars',sendTon:'Send TON with code:',toWallet:'To wallet:',minTon:'⚠️ Min: 1 TON | No code = no credit!',starsInvoiceDesc:'Choose amount. Invoice will arrive in bot chat. Stars will be charged!'}};
 function t(key){return TR[lang]?.[key]||TR['ru'][key]||key}
 
 function formatTime(seconds){
@@ -943,7 +937,6 @@ async function setLang(l){lang=l;try{await fetch('/api/language',{method:'POST',
 
 function toggleDemoInner(){demoModeInner=!demoModeInner;const sw=document.getElementById('demoSwitchInner');demoModeInner?sw.classList.add('active'):sw.classList.remove('active');updateUI();if(currentCase)updateCaseDetailButtons()}
 function updateCaseDetailButtons(){if(!currentCase)return;const isFree=currentCase.id==='free';const can=isFree||demoModeInner||checkBalance();const btn=document.getElementById('detailSpinBtn');btn.className='spin-btn '+(can?'active':'disabled')+(demoModeInner?' demo-btn':(isFree?' free-btn':''));btn.textContent=isFree?t('spinFree'):(demoModeInner?t('spinDemo'):(can?t('spin'):t('topUp')));document.getElementById('detailPrice').textContent=isFree?'🎁 Бесплатно':(demoModeInner?'🆓 '+t('demoLabel'):(currentCase.price_ton?currentCase.price_ton+' TON':(currentCase.price_stars?currentCase.price_stars+' Stars':'Бесплатно')))
-    // Скрываем демо-переключатель для бесплатного кейса
     document.getElementById('demoToggleRow').style.display=isFree?'none':'flex';
 }
 
@@ -1033,9 +1026,8 @@ function showPage(p){document.querySelectorAll('.page').forEach(pg=>pg.classList
 function navigate(p){if(isSpinning)return;showPage(p);document.getElementById('topbarMain').style.display='flex';document.getElementById('topbarCase').style.display='none';currentCase=null;demoModeInner=false;document.getElementById('demoSwitchInner').classList.remove('active');updateUI();document.querySelectorAll('.nav-btn').forEach(b=>b.classList.remove('active'));const navMap={cases:'navCases',wins:'navWins',faq:'navFaq',lang:'navLang',profile:'navProfile'};const an=document.getElementById(navMap[p]);if(an)an.classList.add('active');document.getElementById('mainTitle').textContent=t(p==='cases'?'mainTitle':p==='wins'?'wins':p==='faq'?'faq':p==='lang'?'chooseLang':'profile')}
 function profileTab(t){document.querySelectorAll('#page-profile .tab-btn').forEach(b=>b.classList.remove('active'));document.querySelectorAll('#page-profile .tab-content').forEach(c=>c.classList.remove('active'));event.target.classList.add('active');const el=document.getElementById('ptab-'+t);if(el)el.classList.add('active')}
 
-// Обновление таймера каждую секунду
 setInterval(async()=>{if(freeTimer>0){freeTimer--;if(freeTimer<=0){freeAvail=1;freeTimer=0}updateUI()}},1000);
-setInterval(loadLiveDrops,5000); // Обновление Live Drops каждые 5 секунд
+setInterval(loadLiveDrops,5000);
 
 loadUser();
 </script>
